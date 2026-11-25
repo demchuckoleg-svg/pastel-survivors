@@ -566,6 +566,7 @@ canvas.pixel-art {
 }
 
 .modal-card {
+  position: relative;
   width: min(960px, 100%);
   max-height: calc(100vh - 28px);
   max-height: calc(100dvh - 28px);
@@ -1438,3 +1439,302 @@ canvas.pixel-art {
     height: 22px;
   }
 }
+
+/* ==========================================================================
+   TITLE SCREEN, SUB-VIEWS & PAUSE EXIT CONFIRMATION
+   ========================================================================== */
+
+.title-modal-card {
+  width: min(560px, 100%);
+  padding: 24px 22px;
+}
+
+.subview-compact-card {
+  width: min(720px, 100%);
+}
+
+.title-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 14px;
+}
+
+.title-badge-pill {
+  background: var(--butter);
+  border: 2px solid var(--outline);
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 1px;
+}
+
+.title-main-heading {
+  font-size: clamp(26px, 5vw, 38px);
+  letter-spacing: 2px;
+  margin: 0;
+}
+
+.title-hero-parade {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 4px 0;
+}
+
+.title-hero-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  border: 2.5px solid var(--outline);
+  box-shadow: 0 3px 0 var(--outline);
+  min-width: 84px;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.title-nav-stack {
+  width: min(320px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.title-nav-btn {
+  width: 100%;
+  min-height: 44px;
+  font-size: 14px;
+  font-weight: 900;
+  letter-spacing: 1px;
+}
+
+.title-play-btn {
+  min-height: 50px;
+  font-size: 17px;
+}
+
+.title-status-strip {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+
+.subview-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* Records View */
+.records-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.record-card {
+  background: var(--cream-dark);
+  border: 2.5px solid var(--outline);
+  box-shadow: 0 3px 0 var(--outline);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.record-stats-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Settings View */
+.settings-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  background: var(--cream-dark);
+  border: 2.5px solid var(--outline);
+  padding: 12px 14px;
+  flex-wrap: wrap;
+}
+
+.settings-row-danger {
+  background: #fbe7e4;
+}
+
+.settings-row-text {
+  flex: 1;
+  min-width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.settings-row-title {
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.settings-row-desc {
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.settings-reset-confirm {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.settings-reset-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* How To Play View */
+.howto-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.howto-card {
+  background: var(--cream-dark);
+  border: 2.5px solid var(--outline);
+  box-shadow: 0 3px 0 var(--outline);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.howto-card h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 900;
+  border-bottom: 2px solid var(--outline);
+  padding-bottom: 4px;
+}
+
+.howto-card ul {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.howto-card code {
+  background: var(--cream);
+  border: 1.5px solid var(--outline);
+  padding: 0 4px;
+  font-weight: 900;
+  font-size: 10px;
+}
+
+.howto-debug-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 6px;
+  border-top: 2px dashed rgba(58, 50, 69, 0.25);
+}
+
+.howto-debug-btn {
+  font-size: 11px;
+  padding: 5px 10px;
+  opacity: 0.85;
+}
+
+.howto-debug-btn:hover {
+  opacity: 1;
+}
+
+/* Pause Inline Confirmation Overlay */
+.pause-confirm-overlay {
+  position: absolute;
+  inset: 0;
+  background: rgba(58, 50, 69, 0.62);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 20;
+}
+
+.pause-confirm-card {
+  width: min(380px, 100%);
+  background: var(--cream);
+  border: 3px solid var(--outline);
+  box-shadow: 0 6px 0 var(--outline);
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  text-align: center;
+}
+
+.pause-confirm-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 900;
+  letter-spacing: 1px;
+}
+
+.pause-confirm-text {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.pause-confirm-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+@media (max-width: 780px) {
+  .records-grid,
+  .howto-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .title-modal-card {
+    padding: 16px 14px;
+  }
+
+  .title-hero-badge {
+    min-width: 72px;
+    padding: 6px 8px;
+  }
+
+  .settings-reset-confirm {
+    align-items: flex-start;
+  }
+}
+

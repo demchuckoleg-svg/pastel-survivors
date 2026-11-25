@@ -15,18 +15,20 @@ import type {
   LevelUpChoice,
   RunStatsSnapshot,
 } from '../engine/game';
-import { getBestRun, type AimMode } from '../engine/storage';
+import { getAllBestRuns, getBestRun, resetSaveData, type AimMode } from '../engine/storage';
 
 /**
  * Responsive 16x16 pastel pixel-art UI Manager:
- *  - Main Menu & Class Select (with animated 16x16 previews & localStorage best runs)
+ *  - Main Menu (Title -> Class Select, Records, Settings, How to Play)
  *  - In-game HUD (XP bar, timer, kills, tap-friendly buttons, Boss HP, Hero HP, 6-slot strip + Artifacts)
  *  - Level-Up & Boss Artifact Modals
- *  - Pause Menu (Live stats, Global Passives, Synergy Reference Panel, Debug Tools)
+ *  - Pause Menu (Live stats, Global Passives, Synergy Reference Panel, Exit Confirmation, Hidden Debug Tools)
  *  - Game Over Modal (Run summary & personal-best highlights)
  */
 
 type PauseMobileTab = 'stats' | 'synergies';
+type MenuView = 'title' | 'class_select' | 'records' | 'settings' | 'howto';
+type PauseConfirmAction = 'restart' | 'menu' | null;
 
 function formatTime(totalSec: number): string {
   const sec = Math.max(0, Math.floor(totalSec));
@@ -103,8 +105,12 @@ export class UIManager {
   private lastHudHeroId: HeroId | null = null;
   private lastBossSpriteKey = '';
 
-  // Pause modal mobile tab state
+  // Menu, Pause & Debug UI state
+  private menuView: MenuView = 'title';
+  private confirmResetSave = false;
   private pauseTab: PauseMobileTab = 'stats';
+  private pauseConfirmAction: PauseConfirmAction = null;
+  private debugUnlocked = false;
 
   // UI animation loop
   private rafId: number | null = null;
@@ -168,10 +174,15 @@ export class UIManager {
 
   public handleStateChange(state: GameState): void {
     if (state === 'menu') {
+      this.menuView = 'title';
+      this.confirmResetSave = false;
+      this.pauseConfirmAction = null;
       this.renderMainMenu();
     } else if (state === 'paused') {
+      this.pauseConfirmAction = null;
       this.renderPauseModal();
     } else if (state === 'playing') {
+      this.pauseConfirmAction = null;
       this.resetHudCaches();
       this.updateHud(true);
     }
@@ -211,8 +222,28 @@ export class UIManager {
     this.gameOverLayer.classList.toggle('hidden', state !== 'gameover');
   }
 
+  private toggleDebugUnlocked(): void {
+    this.debugUnlocked = !this.debugUnlocked;
+    const state = this.game.getState();
+    if (state === 'paused') {
+      this.renderPauseModal();
+    } else if (state === 'menu' && this.menuView === 'howto') {
+      this.renderMainMenu();
+    }
+  }
+
   private readonly handleModalKeyDown = (e: KeyboardEvent): void => {
     const state = this.game.getState();
+
+    // Hidden Debug Menu shortcut: Ctrl + Shift + D (or Cmd + Shift + D)
+    if (!e.repeat && (e.ctrlKey || e.metaKey) && e.shiftKey && e.code === 'KeyD') {
+      e.preventDefault();
+      this.game.audio.unlock();
+      this.game.audio.playClick();
+      this.toggleDebugUnlocked();
+      return;
+    }
+
     if (state !== 'levelup' && state !== 'artifact') return;
 
     const idx = e.key === '1' ? 0 : e.key === '2' ? 1 : e.key === '3' ? 2 : -1;
@@ -238,11 +269,112 @@ export class UIManager {
   };
 
   // ==========================================================================
-  // 1. MAIN MENU & CLASS SELECT
+  // 1. MAIN MENU (TITLE, CLASS SELECT, RECORDS, SETTINGS, HOW TO PLAY)
   // ==========================================================================
 
   private renderMainMenu(): void {
     this.menuPreviewCanvases = {};
+    switch (this.menuView) {
+      case 'title':
+        this.renderTitleView();
+        break;
+      case 'class_select':
+        this.renderClassSelectView();
+        break;
+      case 'records':
+        this.renderRecordsView();
+        break;
+      case 'settings':
+        this.renderSettingsView();
+        break;
+      case 'howto':
+        this.renderHowToPlayView();
+        break;
+    }
+  }
+
+  private bindMenuPreviews(): void {
+    const previewNodes = this.menuLayer.querySelectorAll<HTMLCanvasElement>('[data-hero-preview]');
+    previewNodes.forEach((canvas) => {
+      const heroId = canvas.dataset.heroPreview as HeroId;
+      this.menuPreviewCanvases[heroId] = canvas;
+    });
+    this.drawMenuHeroPreviews(0);
+  }
+
+  private bindBackToTitle(): void {
+    this.menuLayer.querySelector('[data-menu-back]')?.addEventListener('click', () => {
+      this.game.audio.unlock();
+      this.game.audio.playClick();
+      this.confirmResetSave = false;
+      this.menuView = 'title';
+      this.renderMainMenu();
+    });
+  }
+
+  private renderTitleView(): void {
+    const muted = this.game.audio.isMuted();
+    const aimMode = this.game.input.getAimMode();
+
+    const heroParadeHtml = CLASS_LIST.map(
+      (cls) => `
+        <div class="title-hero-badge" style="background:${cls.accentColor}">
+          <canvas class="class-preview-canvas pixel-art" width="16" height="16" data-hero-preview="${cls.id}"></canvas>
+          <span>${escapeHtml(cls.name)}</span>
+        </div>
+      `
+    ).join('');
+
+    this.menuLayer.innerHTML = `
+      <div class="modal-card title-modal-card">
+        <div class="title-screen">
+          <div class="title-badge-pill">16x16 PIXEL-ART ROGUELITE</div>
+          <h1 class="menu-title title-main-heading">PASTEL SURVIVORS</h1>
+          <p class="menu-subtitle">3 Heroes • 30 Abilities • 15 Synergies • 3 Bosses • 9 Artifacts</p>
+
+          <div class="title-hero-parade">
+            ${heroParadeHtml}
+          </div>
+
+          <div class="title-nav-stack">
+            <button type="button" class="px-btn px-btn-primary title-nav-btn title-play-btn" data-menu-nav="class_select">
+              PLAY
+            </button>
+            <button type="button" class="px-btn px-btn-lavender title-nav-btn" data-menu-nav="records">
+              RECORDS
+            </button>
+            <button type="button" class="px-btn px-btn-blue title-nav-btn" data-menu-nav="settings">
+              SETTINGS
+            </button>
+            <button type="button" class="px-btn px-btn-peach title-nav-btn" data-menu-nav="howto">
+              HOW TO PLAY
+            </button>
+          </div>
+
+          <div class="title-status-strip">
+            <span class="px-pill">AIM: ${aimMode === 'mouse' ? 'MOUSE' : 'AUTO'}</span>
+            <span class="px-pill">${muted ? 'SFX: OFF' : 'SFX: ON'}</span>
+          </div>
+        </div>
+      </div>
+    `;
+
+    this.bindMenuPreviews();
+
+    const navBtns = this.menuLayer.querySelectorAll<HTMLButtonElement>('[data-menu-nav]');
+    navBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const target = btn.dataset.menuNav as MenuView;
+        this.game.audio.unlock();
+        this.game.audio.playClick();
+        this.confirmResetSave = false;
+        this.menuView = target;
+        this.renderMainMenu();
+      });
+    });
+  }
+
+  private renderClassSelectView(): void {
     const muted = this.game.audio.isMuted();
     const aimMode = this.game.input.getAimMode();
 
@@ -309,9 +441,12 @@ export class UIManager {
     this.menuLayer.innerHTML = `
       <div class="modal-card">
         <div class="menu-header">
-          <div class="menu-title-block">
-            <h1 class="menu-title">PASTEL SURVIVORS</h1>
-            <p class="menu-subtitle">16x16 Pixel-Art Bullet-Heaven Roguelite • 30 Abilities • 15 Synergies • 3 Bosses</p>
+          <div class="subview-title-row">
+            <button type="button" class="px-btn" data-menu-back>← BACK</button>
+            <div class="menu-title-block">
+              <h1 class="menu-title">CHOOSE YOUR HERO</h1>
+              <p class="menu-subtitle">Pick a class to begin your run</p>
+            </div>
           </div>
           <div class="menu-header-actions">
             <button type="button" class="px-btn ${aimMode === 'mouse' ? 'px-btn-blue' : ''}" data-menu-aim>
@@ -333,13 +468,8 @@ export class UIManager {
       </div>
     `;
 
-    // Bind animated preview canvases
-    const previewNodes = this.menuLayer.querySelectorAll<HTMLCanvasElement>('[data-hero-preview]');
-    previewNodes.forEach((canvas) => {
-      const heroId = canvas.dataset.heroPreview as HeroId;
-      this.menuPreviewCanvases[heroId] = canvas;
-    });
-    this.drawMenuHeroPreviews(0);
+    this.bindMenuPreviews();
+    this.bindBackToTitle();
 
     // Bind Start Class buttons
     const startBtns = this.menuLayer.querySelectorAll<HTMLButtonElement>('[data-start-hero]');
@@ -365,6 +495,214 @@ export class UIManager {
     muteBtn?.addEventListener('click', () => {
       this.game.audio.toggleMute();
       this.updateMuteButtons(this.game.audio.isMuted());
+    });
+  }
+
+  private renderRecordsView(): void {
+    const allRuns = getAllBestRuns();
+    const totalRuns = CLASS_LIST.reduce((acc, cls) => acc + allRuns[cls.id].runsPlayed, 0);
+
+    const rowsHtml = CLASS_LIST.map((cls) => {
+      const rec = allRuns[cls.id];
+      return `
+        <div class="record-card">
+          <div class="class-card-top">
+            <div class="class-preview-box" style="background:${cls.accentColor}">
+              <canvas class="class-preview-canvas pixel-art" width="16" height="16" data-hero-preview="${cls.id}"></canvas>
+            </div>
+            <div class="class-name-wrap">
+              <h2 class="class-name">${escapeHtml(cls.name)}</h2>
+              <div class="class-title">${rec.runsPlayed} ${rec.runsPlayed === 1 ? 'Run' : 'Runs'} Played</div>
+            </div>
+          </div>
+          <div class="record-stats-grid">
+            <div class="stat-row"><span class="stat-label">Best Time</span><span class="stat-val">${formatTime(rec.bestTimeSec)}</span></div>
+            <div class="stat-row"><span class="stat-label">Best Level</span><span class="stat-val">LV ${rec.bestLevel}</span></div>
+            <div class="stat-row"><span class="stat-label">Most Kills</span><span class="stat-val">${rec.bestKills}</span></div>
+            <div class="stat-row"><span class="stat-label">Bosses Slain</span><span class="stat-val">${rec.bestBosses}</span></div>
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    this.menuLayer.innerHTML = `
+      <div class="modal-card">
+        <div class="menu-header">
+          <div class="subview-title-row">
+            <button type="button" class="px-btn" data-menu-back>← BACK</button>
+            <div class="menu-title-block">
+              <h1 class="menu-title">BEST RECORDS</h1>
+              <p class="menu-subtitle">Personal bests saved locally (${totalRuns} total ${totalRuns === 1 ? 'run' : 'runs'})</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="records-grid">
+          ${rowsHtml}
+        </div>
+      </div>
+    `;
+
+    this.bindMenuPreviews();
+    this.bindBackToTitle();
+  }
+
+  private renderSettingsView(): void {
+    const muted = this.game.audio.isMuted();
+    const aimMode = this.game.input.getAimMode();
+
+    const resetSection = this.confirmResetSave
+      ? `
+        <div class="settings-reset-confirm">
+          <span>Erase all saved best runs and preferences?</span>
+          <div class="settings-reset-actions">
+            <button type="button" class="px-btn" data-settings-reset-cancel>CANCEL</button>
+            <button type="button" class="px-btn px-btn-coral" data-settings-reset-confirm>YES, RESET ALL</button>
+          </div>
+        </div>
+      `
+      : `
+        <button type="button" class="px-btn px-btn-coral" data-settings-reset>RESET SAVE DATA</button>
+      `;
+
+    this.menuLayer.innerHTML = `
+      <div class="modal-card subview-compact-card">
+        <div class="menu-header">
+          <div class="subview-title-row">
+            <button type="button" class="px-btn" data-menu-back>← BACK</button>
+            <div class="menu-title-block">
+              <h1 class="menu-title">SETTINGS</h1>
+              <p class="menu-subtitle">Preferences are saved automatically</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-list">
+          <div class="settings-row">
+            <div class="settings-row-text">
+              <div class="settings-row-title">Aiming Mode</div>
+              <div class="settings-row-desc">Auto-aim targets the nearest enemy; Mouse aims toward your cursor.</div>
+            </div>
+            <button type="button" class="px-btn ${aimMode === 'mouse' ? 'px-btn-blue' : ''}" data-menu-aim>
+              AIM: ${aimMode === 'mouse' ? 'MOUSE' : 'AUTO'}
+            </button>
+          </div>
+
+          <div class="settings-row">
+            <div class="settings-row-text">
+              <div class="settings-row-title">Sound Effects</div>
+              <div class="settings-row-desc">Procedural Web Audio pastel chiptune SFX for hits, XP, and level-ups.</div>
+            </div>
+            <button type="button" class="px-btn ${muted ? 'px-btn-coral' : 'px-btn-butter'}" data-menu-mute>
+              ${muted ? 'SFX: OFF' : 'SFX: ON'}
+            </button>
+          </div>
+
+          <div class="settings-row settings-row-danger">
+            <div class="settings-row-text">
+              <div class="settings-row-title">Reset Save Data</div>
+              <div class="settings-row-desc">Clears all per-class personal best records and restores default settings.</div>
+            </div>
+            ${resetSection}
+          </div>
+        </div>
+      </div>
+    `;
+
+    this.bindBackToTitle();
+
+    this.menuLayer.querySelector<HTMLButtonElement>('[data-menu-aim]')?.addEventListener('click', () => {
+      this.game.audio.unlock();
+      const next = this.game.input.toggleAimMode();
+      this.updateAimButtons(next);
+    });
+
+    this.menuLayer.querySelector<HTMLButtonElement>('[data-menu-mute]')?.addEventListener('click', () => {
+      this.game.audio.toggleMute();
+      this.updateMuteButtons(this.game.audio.isMuted());
+    });
+
+    this.menuLayer.querySelector('[data-settings-reset]')?.addEventListener('click', () => {
+      this.game.audio.unlock();
+      this.game.audio.playClick();
+      this.confirmResetSave = true;
+      this.renderMainMenu();
+    });
+
+    this.menuLayer.querySelector('[data-settings-reset-cancel]')?.addEventListener('click', () => {
+      this.game.audio.playClick();
+      this.confirmResetSave = false;
+      this.renderMainMenu();
+    });
+
+    this.menuLayer.querySelector('[data-settings-reset-confirm]')?.addEventListener('click', () => {
+      this.game.audio.playClick();
+      resetSaveData();
+      this.game.audio.setMuted(false);
+      this.game.input.setAimMode('auto');
+      this.updateMuteButtons(false);
+      this.updateAimButtons('auto');
+      this.confirmResetSave = false;
+      this.renderMainMenu();
+    });
+  }
+
+  private renderHowToPlayView(): void {
+    this.menuLayer.innerHTML = `
+      <div class="modal-card subview-compact-card">
+        <div class="menu-header">
+          <div class="subview-title-row">
+            <button type="button" class="px-btn" data-menu-back>← BACK</button>
+            <div class="menu-title-block">
+              <h1 class="menu-title">HOW TO PLAY</h1>
+              <p class="menu-subtitle">Survive the pastel swarm, evolve synergies, and claim Boss Artifacts</p>
+            </div>
+          </div>
+        </div>
+
+        <div class="howto-grid">
+          <div class="howto-card">
+            <h3>Controls</h3>
+            <ul>
+              <li><strong>Desktop:</strong> <code>WASD</code> or <code>Arrow Keys</code> to move, <code>M</code> to toggle Auto/Mouse aim, <code>ESC</code> / <code>P</code> to pause.</li>
+              <li><strong>Mobile:</strong> Touch and drag anywhere on the arena to use the floating pastel joystick.</li>
+              <li><strong>Modals:</strong> Press <code>1</code>, <code>2</code>, or <code>3</code> (or tap a card) to pick upgrades.</li>
+            </ul>
+          </div>
+
+          <div class="howto-card">
+            <h3>Abilities & Synergies</h3>
+            <ul>
+              <li>Carry up to <strong>${MAX_ACTIVE_ABILITY_SLOTS} active abilities</strong>. Every ability levels up to <strong>Lv ${MAX_ABILITY_LEVEL}</strong>.</li>
+              <li>Reaching <strong>Lv 5</strong> and <strong>Lv 10</strong> unlocks permanent global passives that last the entire run.</li>
+              <li>Maxing a matching pair (<strong>Lv 10 + Lv 10</strong>) unlocks an evolved <strong>Synergy</strong>, freeing 1 active slot while keeping all passives!</li>
+            </ul>
+          </div>
+
+          <div class="howto-card">
+            <h3>Bosses & Artifacts</h3>
+            <ul>
+              <li>Every <strong>10:00</strong> a Boss arrives (<em>King Mochi</em>, <em>Lady Wisteria</em>, <em>Aegis</em>) with telegraphed attacks.</li>
+              <li>Defeating a Boss drops a <strong>Boss Chest</strong> that heals you and grants a powerful class-specific <strong>Boss Artifact</strong>.</li>
+              <li>Watch for rare <strong>Pastel Hearts</strong> (healing) and <strong>Magnet Orbs</strong> (pull all XP gems).</li>
+            </ul>
+          </div>
+        </div>
+
+        <div class="howto-debug-footer">
+          <button type="button" class="px-btn ${this.debugUnlocked ? 'px-btn-peach' : ''} howto-debug-btn" data-howto-debug-toggle>
+            DEBUG MODE: ${this.debugUnlocked ? 'ON' : 'OFF'}
+          </button>
+        </div>
+      </div>
+    `;
+
+    this.bindBackToTitle();
+
+    this.menuLayer.querySelector('[data-howto-debug-toggle]')?.addEventListener('click', () => {
+      this.game.audio.unlock();
+      this.game.audio.playClick();
+      this.toggleDebugUnlocked();
     });
   }
 
@@ -1086,6 +1424,9 @@ export class UIManager {
           </div>
         </div>
 
+        ${
+          this.debugUnlocked
+            ? `
         <div class="debug-bar">
           <h3 class="pause-section-title">
             <span>Debug Tools</span>
@@ -1098,6 +1439,32 @@ export class UIManager {
             <button type="button" class="px-btn px-btn-butter" data-debug-levels="5">+5 Levels</button>
           </div>
         </div>
+        `
+            : ''
+        }
+
+        ${
+          this.pauseConfirmAction
+            ? `
+        <div class="pause-confirm-overlay" data-pause-confirm-overlay>
+          <div class="pause-confirm-card">
+            <h3 class="pause-confirm-title">
+              ${this.pauseConfirmAction === 'restart' ? 'RESTART RUN?' : 'EXIT TO MAIN MENU?'}
+            </h3>
+            <p class="pause-confirm-text">
+              Abandon current run? Current progress will be lost.
+            </p>
+            <div class="pause-confirm-actions">
+              <button type="button" class="px-btn" data-pause-confirm-cancel>CANCEL</button>
+              <button type="button" class="px-btn px-btn-coral" data-pause-confirm-yes>
+                ${this.pauseConfirmAction === 'restart' ? 'CONFIRM RESTART' : 'EXIT TO MENU'}
+              </button>
+            </div>
+          </div>
+        </div>
+        `
+            : ''
+        }
       </div>
     `;
 
@@ -1105,20 +1472,41 @@ export class UIManager {
     this.pauseLayer.querySelector('[data-pause-resume]')?.addEventListener('click', () => {
       this.game.audio.unlock();
       this.game.audio.playClick();
+      this.pauseConfirmAction = null;
       this.game.resume();
     });
 
     this.pauseLayer.querySelector('[data-pause-restart]')?.addEventListener('click', () => {
       this.game.audio.unlock();
       this.game.audio.playClick();
-      this.resetHudCaches();
-      this.game.startRun(this.game.player.heroId);
+      this.pauseConfirmAction = 'restart';
+      this.renderPauseModal();
     });
 
     this.pauseLayer.querySelector('[data-pause-menu]')?.addEventListener('click', () => {
       this.game.audio.unlock();
       this.game.audio.playClick();
-      this.game.setState('menu');
+      this.pauseConfirmAction = 'menu';
+      this.renderPauseModal();
+    });
+
+    this.pauseLayer.querySelector('[data-pause-confirm-cancel]')?.addEventListener('click', () => {
+      this.game.audio.playClick();
+      this.pauseConfirmAction = null;
+      this.renderPauseModal();
+    });
+
+    this.pauseLayer.querySelector('[data-pause-confirm-yes]')?.addEventListener('click', () => {
+      const action = this.pauseConfirmAction;
+      this.pauseConfirmAction = null;
+      this.game.audio.unlock();
+      this.game.audio.playClick();
+      if (action === 'restart') {
+        this.resetHudCaches();
+        this.game.startRun(this.game.player.heroId);
+      } else if (action === 'menu') {
+        this.game.setState('menu');
+      }
     });
 
     this.pauseLayer.querySelector('[data-pause-aim]')?.addEventListener('click', () => {
@@ -1142,7 +1530,7 @@ export class UIManager {
       });
     });
 
-    // Bind Debug Tools
+    // Bind Debug Tools (only present when debugUnlocked === true)
     const bossBtns = this.pauseLayer.querySelectorAll<HTMLButtonElement>('[data-debug-boss]');
     bossBtns.forEach((btn) => {
       btn.addEventListener('click', () => {
