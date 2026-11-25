@@ -20,10 +20,13 @@ import {
   MAX_ACTIVE_ABILITY_SLOTS,
 } from '../data/classes';
 import {
+  BOSS_SPAWN_INTERVAL_MIN,
+  BOSSES,
   ENEMIES,
   enemyHP,
   enemySpawnRate,
   enemyXP,
+  getBossForEncounter,
   pickWaveArchetype,
   xpNeeded,
 } from '../data/enemies';
@@ -36,6 +39,7 @@ import type {
   AbilityId,
   ArtifactDef,
   ArtifactId,
+  BossId,
   GlobalStatKey,
   SynergyDef,
   SynergyId,
@@ -50,6 +54,13 @@ import {
   type GlobalPassiveEntry,
   type ParticleBurstOptions,
 } from '../entities/abilityRunner';
+import {
+  BossAIManager,
+  getBossDamageScale,
+  getBossScaledHp,
+  type BossActiveInfo,
+  type BossAIContext,
+} from '../entities/bossAI';
 import { AudioManager } from './audio';
 import { InputManager } from './input';
 import { SpatialHash } from './spatialHash';
@@ -179,6 +190,8 @@ export interface GameEngineCallbacks {
   onStateChange?: (state: GameState) => void;
   onAimModeChange?: (mode: AimMode) => void;
   onLevelUp?: (choices: LevelUpChoice[]) => void;
+  onBossSpawned?: (boss: BossActiveInfo) => void;
+  onBossDefeated?: (boss: BossActiveInfo) => void;
   onBossChestCollected?: (choices: ArtifactDef[]) => void;
   onGameOver?: (summary: RunStatsSnapshot) => void;
 }
@@ -215,6 +228,7 @@ export class GameEngine {
   public readonly input: InputManager;
   public readonly spatialHash: SpatialHash<EnemyEntity>;
   public readonly abilityRunner: AbilityRunner;
+  public readonly bossAI: BossAIManager;
 
   public readonly player: PlayerState;
   public readonly camera: CameraState;
@@ -233,14 +247,26 @@ export class GameEngine {
   private rafId: number | null = null;
   private lastTimestamp = 0;
 
-  // Combat & progression state
+  // Combat, wave director & progression state
   private nextEnemyId = 1;
   private spawnAccumulator = 0;
+  private nextBossEncounterIndex = 0;
+  private nextSwarmWaveSec = 45;
   private kills = 0;
   private bossesDefeated = 0;
   private masteryCount = 0;
   private pendingLevelUps = 0;
   private pendingChoices: LevelUpChoice[] = [];
+  private pendingArtifactChoices: ArtifactDef[] = [];
+
+  // Boss spawn alert banner
+  private bossAlertTimer = 0;
+  private bossAlertTitle = '';
+  private bossAlertSubtitle = '';
+  private bossAlertColor: string = PALETTE.coral;
+
+  // Reusable query buffer for zero-allocation enemy separation
+  private readonly sepQueryBuf: EnemyEntity[] = [];
 
   // Ability slots, Synergy evolution & Global Passive Ledger
   private activeSlots: ActiveAbilitySlot[] = [];
@@ -263,6 +289,7 @@ export class GameEngine {
     this.audio = new AudioManager();
     this.spatialHash = new SpatialHash<EnemyEntity>(64);
     this.abilityRunner = new AbilityRunner();
+    this.bossAI = new BossAIManager();
 
     this.input = new InputManager(canvas, {
       onPauseToggle: () => this.togglePause(),
@@ -363,6 +390,32 @@ export class GameEngine {
     return this.pendingChoices;
   }
 
+  public getPendingArtifactChoices(): readonly ArtifactDef[] {
+    return this.pendingArtifactChoices;
+  }
+
+  public getActiveBoss(): EnemyEntity | null {
+    for (let i = 0; i < this.enemies.length; i++) {
+      const e = this.enemies[i];
+      if (e.alive && e.isBoss) return e;
+    }
+    return null;
+  }
+
+  public getActiveBosses(): EnemyEntity[] {
+    return this.enemies.filter((e) => e.alive && e.isBoss);
+  }
+
+  public getActiveBossInfo(): BossActiveInfo | null {
+    const boss = this.getActiveBoss();
+    return boss ? this.bossAI.getBossInfo(boss) : null;
+  }
+
+  public getNextBossCountdownSec(): number {
+    const nextSpawnSec = (this.nextBossEncounterIndex + 1) * BOSS_SPAWN_INTERVAL_MIN * 60;
+    return Math.max(0, nextSpawnSec - this.elapsedRunSec);
+  }
+
   public getRunStatsSnapshot(): RunStatsSnapshot {
     return {
       elapsedRunSec: this.elapsedRunSec,
@@ -426,11 +479,15 @@ export class GameEngine {
     this.elapsedRunSec = 0;
     this.nextEnemyId = 1;
     this.spawnAccumulator = 0;
+    this.nextBossEncounterIndex = 0;
+    this.nextSwarmWaveSec = 45;
     this.kills = 0;
     this.bossesDefeated = 0;
     this.masteryCount = 0;
     this.pendingLevelUps = 0;
     this.pendingChoices = [];
+    this.pendingArtifactChoices = [];
+    this.bossAlertTimer = 0;
 
     this.enemies.length = 0;
     this.enemyProjectiles.length = 0;
@@ -446,6 +503,7 @@ export class GameEngine {
 
     this.spatialHash.clear();
     this.abilityRunner.reset();
+    this.bossAI.reset();
 
     this.recomputeStats(false);
     // Equip hero's signature starting ability at Lv 1
@@ -733,8 +791,15 @@ export class GameEngine {
       speedMax: 210,
     });
 
+    this.pendingArtifactChoices = [];
+
     if (this.state === 'artifact') {
-      this.resume();
+      if (this.pendingLevelUps > 0) {
+        this.pendingLevelUps--;
+        this.openNextLevelUp();
+      } else {
+        this.resume();
+      }
     }
   }
 
@@ -1031,11 +1096,126 @@ export class GameEngine {
       burnTickTimer: 0,
       burnColor: PALETTE.coral,
       rangedCooldown: def.rangedCooldown ? def.rangedCooldown * (0.5 + Math.random() * 0.5) : 0,
+      aiState: 'normal',
+      aiTimer: 0,
+      aiCooldown: def.behavior === 'chase_tank' ? 2.2 + Math.random() * 2.0 : 0,
       alive: true,
     };
 
     this.enemies.push(enemy);
     return enemy;
+  }
+
+  /**
+   * Spawns a scheduled or debug Boss (King Mochi, Lady Wisteria, or Aegis) with
+   * cycle-scaled HP, contact damage, and telegraphed attack state machine.
+   */
+  public spawnBoss(bossId?: BossId, encounterIndexOverride?: number): EnemyEntity {
+    const encounterIndex =
+      encounterIndexOverride !== undefined
+        ? encounterIndexOverride
+        : bossId !== undefined
+        ? this.bossesDefeated
+        : this.nextBossEncounterIndex;
+
+    const bossDef = bossId ? BOSSES[bossId] : getBossForEncounter(encounterIndex);
+    const minutes = this.elapsedRunSec / 60;
+    const maxHp = getBossScaledHp(bossDef, minutes, encounterIndex);
+    const xpValue = Math.max(40, Math.round(enemyXP(bossDef.baseXp, minutes)));
+    const contactDamage = bossDef.contactDamage * getBossDamageScale(minutes, encounterIndex);
+
+    // Guarantee room for the boss even if regular waves hit MAX_ENEMIES
+    if (this.enemies.length >= MAX_ENEMIES) {
+      let farIdx = -1;
+      let farDistSq = -1;
+      for (let i = 0; i < this.enemies.length; i++) {
+        const candidate = this.enemies[i];
+        if (candidate.isBoss) continue;
+        const dx = candidate.x - this.player.x;
+        const dy = candidate.y - this.player.y;
+        const dSq = dx * dx + dy * dy;
+        if (dSq > farDistSq) {
+          farDistSq = dSq;
+          farIdx = i;
+        }
+      }
+      if (farIdx !== -1) {
+        this.enemies.splice(farIdx, 1);
+      }
+    }
+
+    // Spawn just inside/near the perimeter ahead of the player for dramatic arrival
+    const spawnDist = Math.min(
+      Math.max(260, Math.min(this.viewportWidth, this.viewportHeight) * 0.44),
+      380
+    );
+    const angle = this.player.isMoving
+      ? Math.atan2(this.player.vy, this.player.vx) + (Math.random() - 0.5) * 0.9
+      : Math.random() * Math.PI * 2;
+    const sx = this.player.x + Math.cos(angle) * spawnDist;
+    const sy = this.player.y + Math.sin(angle) * spawnDist;
+
+    const boss: EnemyEntity = {
+      id: this.nextEnemyId++,
+      archetypeId: 'golem',
+      bossId: bossDef.id,
+      isBoss: true,
+      bossEncounterIndex: encounterIndex,
+      x: sx,
+      y: sy,
+      vx: 0,
+      vy: 0,
+      kbVx: 0,
+      kbVy: 0,
+      radius: bossDef.radius,
+      hp: maxHp,
+      maxHp,
+      speed: bossDef.speed,
+      damage: contactDamage,
+      xpValue,
+      knockbackResist: 0.92,
+      facingLeft: sx > this.player.x,
+      walkTime: 0,
+      hitFlashTimer: 0,
+      slowTimer: 0,
+      slowFactor: 1,
+      freezeTimer: 0,
+      stunTimer: 0,
+      burnTimer: 0,
+      burnDps: 0,
+      burnTickTimer: 0,
+      burnColor: bossDef.accentColor,
+      rangedCooldown: 0,
+      aiState: 'normal',
+      aiTimer: 0,
+      aiCooldown: 0,
+      alive: true,
+    };
+
+    this.enemies.push(boss);
+    this.bossAI.registerBoss(boss, bossDef.id, encounterIndex);
+
+    this.audio.playBossAlert();
+    this.addScreenShake(5.5, 0.32);
+    this.spawnRingParticle(sx, sy, bossDef.accentColor, 145, 0.55);
+    this.spawnParticles(sx, sy, bossDef.accentColor, 26, {
+      speedMin: 75,
+      speedMax: 220,
+      sizeMin: 4,
+      sizeMax: 8,
+    });
+
+    this.bossAlertTimer = 3.2;
+    this.bossAlertTitle = bossDef.name.toUpperCase();
+    this.bossAlertSubtitle = bossDef.title;
+    this.bossAlertColor = bossDef.accentColor;
+
+    const info = this.bossAI.getBossInfo(boss);
+    if (info) {
+      this.callbacks.onBossSpawned?.(info);
+    }
+
+    return boss;
   }
 
   public spawnPickup(
@@ -1044,7 +1224,7 @@ export class GameEngine {
     y: number,
     value = 0
   ): void {
-    // Soft cap XP gems to protect framerate in extreme swarms
+    // Soft cap XP gems to protect framerate in extreme swarms (never cap hearts/magnets/chests)
     if (this.pickups.length >= MAX_PICKUPS && kind.startsWith('xp_')) {
       const oldestXp = this.pickups.find((p) => p.kind.startsWith('xp_'));
       if (oldestXp) {
@@ -1054,14 +1234,15 @@ export class GameEngine {
       }
     }
 
+    const scatter = kind === 'chest' ? 14 : 45;
     this.pickups.push({
       kind,
       x,
       y,
-      vx: (Math.random() - 0.5) * 45,
-      vy: (Math.random() - 0.5) * 45,
+      vx: (Math.random() - 0.5) * scatter,
+      vy: (Math.random() - 0.5) * scatter,
       value,
-      radius: kind === 'chest' ? 18 : 10,
+      radius: kind === 'chest' ? 20 : 10,
       magnetized: false,
       age: 0,
     });
@@ -1298,7 +1479,59 @@ export class GameEngine {
     enemy.alive = false;
     this.kills += 1;
 
-    // Pastel death burst
+    if (enemy.isBoss) {
+      const bossInfo = this.bossAI.getBossInfo(enemy);
+      this.bossAI.onBossRemoved(enemy.id);
+      this.bossesDefeated += 1;
+
+      const bossAccent = bossInfo?.accentColor ?? PALETTE.butter;
+      this.spawnRingParticle(enemy.x, enemy.y, bossAccent, 165, 0.55);
+      this.spawnRingParticle(enemy.x, enemy.y, PALETTE.butter, 115, 0.45);
+      this.spawnParticles(enemy.x, enemy.y, bossAccent, 30, {
+        speedMin: 60,
+        speedMax: 250,
+        sizeMin: 4,
+        sizeMax: 8,
+      });
+      this.spawnParticles(enemy.x, enemy.y, PALETTE.butter, 16, {
+        speedMin: 50,
+        speedMax: 190,
+        sizeMin: 3,
+        sizeMax: 6,
+      });
+      this.spawnFloatingText(
+        enemy.x,
+        enemy.y - enemy.radius - 16,
+        'BOSS DEFEATED!',
+        PALETTE.butter,
+        true
+      );
+      this.addScreenShake(8.0, 0.4);
+      this.audio.playPickup();
+
+      // Scatter a rewarding burst of large XP gems around the boss
+      const gemCount = 4;
+      const perGemXp = Math.max(10, Math.round(enemy.xpValue / gemCount));
+      for (let g = 0; g < gemCount; g++) {
+        const a = (Math.PI * 2 * g) / gemCount + 0.35;
+        this.spawnPickup(
+          'xp_large',
+          enemy.x + Math.cos(a) * 26,
+          enemy.y + Math.sin(a) * 26,
+          perGemXp
+        );
+      }
+
+      // Drop Boss Chest at the boss's defeat location
+      this.spawnPickup('chest', enemy.x, enemy.y, 0);
+
+      if (bossInfo) {
+        this.callbacks.onBossDefeated?.(bossInfo);
+      }
+      return;
+    }
+
+    // Standard enemy pastel death burst
     const burstColor =
       enemy.archetypeId === 'slime'
         ? PALETTE.rose
@@ -1308,9 +1541,9 @@ export class GameEngine {
         ? PALETTE.lavender
         : PALETTE.mint;
 
-    this.spawnParticles(enemy.x, enemy.y, burstColor, enemy.isBoss ? 28 : 10, {
+    this.spawnParticles(enemy.x, enemy.y, burstColor, 10, {
       speedMin: 50,
-      speedMax: enemy.isBoss ? 240 : 145,
+      speedMax: 145,
       sizeMin: 4,
       sizeMax: 7,
     });
@@ -1320,18 +1553,12 @@ export class GameEngine {
       enemy.xpValue >= 20 ? 'xp_large' : enemy.xpValue >= 9 ? 'xp_medium' : 'xp_small';
     this.spawnPickup(xpTier, enemy.x, enemy.y, enemy.xpValue);
 
-    if (enemy.isBoss) {
-      this.bossesDefeated += 1;
-      this.spawnPickup('chest', enemy.x + 12, enemy.y, 0);
-      this.addScreenShake(7.5, 0.35);
-    } else {
-      // Rare regular enemy drops: Pastel Heart (1.2%) & Magnet Orb (0.5%)
-      const roll = Math.random();
-      if (roll < 0.005) {
-        this.spawnPickup('magnet', enemy.x + 8, enemy.y, 0);
-      } else if (roll < 0.017) {
-        this.spawnPickup('heart', enemy.x + 8, enemy.y, 0);
-      }
+    // Rare regular enemy drops: Magnet Orb (0.55%) & Pastel Heart (1.25%)
+    const roll = Math.random();
+    if (roll < 0.0055) {
+      this.spawnPickup('magnet', enemy.x + 8, enemy.y, 0);
+    } else if (roll < 0.018) {
+      this.spawnPickup('heart', enemy.x + 8, enemy.y, 0);
     }
   }
 
@@ -1379,6 +1606,46 @@ export class GameEngine {
     };
   }
 
+  private createBossAIContext(): BossAIContext {
+    return {
+      player: this.player,
+      elapsedRunSec: this.elapsedRunSec,
+      damagePlayer: (rawDamage) => this.damagePlayer(rawDamage),
+      spawnEnemyProjectile: (opts) => {
+        this.enemyProjectiles.push({
+          x: opts.x,
+          y: opts.y,
+          vx: opts.vx,
+          vy: opts.vy,
+          radius: opts.radius,
+          damage: opts.damage,
+          life: 0,
+          maxLife: opts.maxLife,
+          color: opts.color,
+        });
+      },
+      spawnMinion: (archetypeId, x, y, impulseX = 0, impulseY = 0) => {
+        if (this.enemies.length >= MAX_ENEMIES) return;
+        const minion = this.spawnEnemy(archetypeId, x, y);
+        minion.kbVx = impulseX;
+        minion.kbVy = impulseY;
+      },
+      spawnParticles: this.spawnParticles,
+      spawnRingParticle: this.spawnRingParticle,
+      spawnFloatingText: this.spawnFloatingText,
+      addScreenShake: (intensity, dur) => this.addScreenShake(intensity, dur),
+      getMinionCount: () => {
+        let count = 0;
+        for (let i = 0; i < this.enemies.length; i++) {
+          if (this.enemies[i].alive && this.enemies[i].archetypeId === 'minislime') {
+            count++;
+          }
+        }
+        return count;
+      },
+    };
+  }
+
   // ==========================================================================
   // CORE LOOP & UPDATE SUBSYSTEMS
   // ==========================================================================
@@ -1408,16 +1675,21 @@ export class GameEngine {
 
   private update(dt: number): void {
     this.elapsedRunSec += dt;
+    if (this.bossAlertTimer > 0) {
+      this.bossAlertTimer = Math.max(0, this.bossAlertTimer - dt);
+    }
 
     this.updatePlayer(dt);
     this.updateWaveSpawner(dt);
     this.updateEnemies(dt);
     this.updateEnemyProjectiles(dt);
 
-    // Rebuild 64px spatial hash for fast ability targeting & hitboxes
+    // Populate 64px spatial hash, apply mass-aware separation, and refresh for combat queries
     this.spatialHash.clear();
     this.spatialHash.insertAll(this.enemies);
-    this.spatialHash.resolveSeparation(this.enemies, 14, 0.38);
+    this.resolveEnemySeparation();
+    this.spatialHash.clear();
+    this.spatialHash.insertAll(this.enemies);
 
     // Execute all active abilities & evolved synergies
     const combatCtx = this.createCombatContext();
@@ -1426,6 +1698,9 @@ export class GameEngine {
     // Prune dead enemies after combat step
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       if (!this.enemies[i].alive) {
+        if (this.enemies[i].isBoss) {
+          this.bossAI.onBossRemoved(this.enemies[i].id);
+        }
         this.enemies.splice(i, 1);
       }
     }
@@ -1491,14 +1766,33 @@ export class GameEngine {
     }
   }
 
+  /**
+   * Wave Director:
+   * - Spawns scheduled Bosses every 10 minutes (King Mochi 10:00, Lady Wisteria 20:00,
+   *   Aegis 30:00, cycling indefinitely with scaled HP and faster cooldowns).
+   * - Continuously scales regular enemy spawn rate, HP, and XP drops with elapsed minutes `t`.
+   * - Triggers periodic coordinated swarmer clusters for exciting wave rhythm.
+   */
   private updateWaveSpawner(dt: number): void {
+    // 1. Scheduled 10-minute Boss encounters
+    let nextBossSec = (this.nextBossEncounterIndex + 1) * BOSS_SPAWN_INTERVAL_MIN * 60;
+    while (this.elapsedRunSec >= nextBossSec) {
+      const encounterIdx = this.nextBossEncounterIndex;
+      this.nextBossEncounterIndex += 1;
+      const bossDef = getBossForEncounter(encounterIdx);
+      this.spawnBoss(bossDef.id, encounterIdx);
+      nextBossSec = (this.nextBossEncounterIndex + 1) * BOSS_SPAWN_INTERVAL_MIN * 60;
+    }
+
     if (this.enemies.length >= MAX_ENEMIES) return;
 
     const minutes = this.elapsedRunSec / 60;
-    const rate = enemySpawnRate(minutes);
-    this.spawnAccumulator += rate * dt;
-
+    const bossActive = this.bossAI.hasActiveBoss();
     const spawnRadius = Math.hypot(this.viewportWidth * 0.5, this.viewportHeight * 0.5) + 75;
+
+    // 2. Continuous scaled wave spawning (eased slightly during boss fights for readability)
+    const rate = enemySpawnRate(minutes) * (bossActive ? 0.55 : 1);
+    this.spawnAccumulator += rate * dt;
 
     while (this.spawnAccumulator >= 1 && this.enemies.length < MAX_ENEMIES) {
       this.spawnAccumulator -= 1;
@@ -1509,6 +1803,24 @@ export class GameEngine {
       const sy = this.player.y + Math.sin(angle) * dist;
       this.spawnEnemy(archetype.id, sx, sy);
     }
+
+    // 3. Periodic coordinated swarm clusters (every 50s when no boss is active)
+    if (!bossActive && this.elapsedRunSec >= this.nextSwarmWaveSec) {
+      this.nextSwarmWaveSec += 50;
+      const packSize = Math.min(18, 6 + Math.floor(minutes * 1.4));
+      const baseAngle = Math.random() * Math.PI * 2;
+      const arcSpan = Math.min(Math.PI * 1.2, 0.7 + minutes * 0.06);
+
+      for (let i = 0; i < packSize && this.enemies.length < MAX_ENEMIES; i++) {
+        const frac = packSize > 1 ? i / (packSize - 1) - 0.5 : 0;
+        const a = baseAngle + frac * arcSpan + (Math.random() - 0.5) * 0.12;
+        const d = spawnRadius + 30 + Math.random() * 75;
+        const sx = this.player.x + Math.cos(a) * d;
+        const sy = this.player.y + Math.sin(a) * d;
+        const isBruteLead = minutes >= 3.5 && i === Math.floor(packSize / 2);
+        this.spawnEnemy(isBruteLead ? 'golem' : 'slime', sx, sy);
+      }
+    }
   }
 
   private updateEnemies(dt: number): void {
@@ -1516,6 +1828,7 @@ export class GameEngine {
     const despawnDistSq =
       (Math.hypot(this.viewportWidth, this.viewportHeight) * 0.9 + 260) ** 2;
     const kbDecay = Math.exp(-10 * dt);
+    const bossCtx = this.bossAI.hasActiveBoss() ? this.createBossAIContext() : null;
 
     for (let i = this.enemies.length - 1; i >= 0; i--) {
       const e = this.enemies[i];
@@ -1544,16 +1857,32 @@ export class GameEngine {
         }
       }
 
+      // Boss state machine execution
+      if (e.isBoss && bossCtx) {
+        const canDealContact = this.bossAI.updateBoss(e, dt, bossCtx);
+        if (canDealContact) {
+          const bdx = p.x - e.x;
+          const bdy = p.y - e.y;
+          const hitDist = p.radius + e.radius - 3;
+          if (bdx * bdx + bdy * bdy <= hitDist * hitDist) {
+            this.damagePlayer(e.damage);
+          }
+        }
+        continue;
+      }
+
       const dx = p.x - e.x;
       const dy = p.y - e.y;
       const distSq = dx * dx + dy * dy;
 
       // Recycle far-away standard enemies back around the arena edge
-      if (!e.isBoss && distSq > despawnDistSq) {
+      if (distSq > despawnDistSq) {
         const angle = Math.random() * Math.PI * 2;
         const r = Math.hypot(this.viewportWidth * 0.5, this.viewportHeight * 0.5) + 90;
         e.x = p.x + Math.cos(angle) * r;
         e.y = p.y + Math.sin(angle) * r;
+        e.aiState = 'normal';
+        e.aiTimer = 0;
         continue;
       }
 
@@ -1567,38 +1896,96 @@ export class GameEngine {
         const ny = dy / dist;
 
         if (def.behavior === 'ranged_kiter' && def.rangedRange) {
-          if (dist > def.rangedRange) {
+          // RANGED KITER (Wisteria Wisp): maintains firing band & telegraphs orb casts
+          if (e.aiState === 'windup') {
+            e.vx = nx * moveSpd * 0.15;
+            e.vy = ny * moveSpd * 0.15;
+            e.aiTimer = (e.aiTimer ?? 0) - dt;
+            if ((e.aiTimer ?? 0) <= 0) {
+              e.aiState = 'normal';
+              e.rangedCooldown = (def.rangedCooldown ?? 2.6) * (0.9 + Math.random() * 0.2);
+              const projSpd = def.projectileSpeed ?? 185;
+              this.enemyProjectiles.push({
+                x: e.x,
+                y: e.y,
+                vx: nx * projSpd,
+                vy: ny * projSpd,
+                radius: 7,
+                damage: e.damage,
+                life: 0,
+                maxLife: 2.8,
+                color: PALETTE.lavender,
+              });
+              this.spawnParticles(e.x, e.y, PALETTE.lavenderLight, 4, {
+                speedMin: 25,
+                speedMax: 80,
+                sizeMin: 2,
+                sizeMax: 4,
+              });
+            }
+          } else {
+            if (dist > def.rangedRange) {
+              e.vx = nx * moveSpd;
+              e.vy = ny * moveSpd;
+            } else if (dist < def.rangedRange * 0.7) {
+              e.vx = -nx * moveSpd * 0.65;
+              e.vy = -ny * moveSpd * 0.65;
+            } else {
+              const strafeDir = e.id % 2 === 0 ? 1 : -1;
+              e.vx = -ny * moveSpd * 0.6 * strafeDir;
+              e.vy = nx * moveSpd * 0.6 * strafeDir;
+            }
+
+            e.rangedCooldown -= dt;
+            if (e.rangedCooldown <= 0 && dist <= def.rangedRange * 1.35) {
+              e.aiState = 'windup';
+              e.aiTimer = 0.36;
+            }
+          }
+        } else if (def.behavior === 'chase_tank') {
+          // SLOW BRUTE (Porcelain Golem): relentless heavy march + short telegraphed shoulder lunge
+          e.aiCooldown = Math.max(0, (e.aiCooldown ?? 0) - dt);
+          if (e.aiState === 'windup') {
+            e.vx = 0;
+            e.vy = 0;
+            e.aiTimer = (e.aiTimer ?? 0) - dt;
+            if ((e.aiTimer ?? 0) <= 0) {
+              e.aiState = 'lunge';
+              e.aiTimer = 0.32;
+              e.lungeDirX = nx;
+              e.lungeDirY = ny;
+              this.spawnParticles(e.x, e.y + 8, PALETTE.peach, 5, {
+                speedMin: 30,
+                speedMax: 95,
+              });
+            }
+          } else if (e.aiState === 'lunge') {
+            const lx = e.lungeDirX ?? nx;
+            const ly = e.lungeDirY ?? ny;
+            e.vx = lx * moveSpd * 1.85;
+            e.vy = ly * moveSpd * 1.85;
+            e.aiTimer = (e.aiTimer ?? 0) - dt;
+            if ((e.aiTimer ?? 0) <= 0) {
+              e.aiState = 'normal';
+              e.aiCooldown = 4.6;
+            }
+          } else {
             e.vx = nx * moveSpd;
             e.vy = ny * moveSpd;
-          } else if (dist < def.rangedRange * 0.68) {
-            e.vx = -nx * moveSpd * 0.6;
-            e.vy = -ny * moveSpd * 0.6;
-          } else {
-            // Gentle orbital strafe while lining up shot
-            const strafeDir = e.id % 2 === 0 ? 1 : -1;
-            e.vx = -ny * moveSpd * 0.55 * strafeDir;
-            e.vy = nx * moveSpd * 0.55 * strafeDir;
-          }
-
-          e.rangedCooldown -= dt;
-          if (e.rangedCooldown <= 0 && dist <= def.rangedRange * 1.35) {
-            e.rangedCooldown = def.rangedCooldown ?? 2.6;
-            const projSpd = def.projectileSpeed ?? 185;
-            this.enemyProjectiles.push({
-              x: e.x,
-              y: e.y,
-              vx: nx * projSpd,
-              vy: ny * projSpd,
-              radius: 7,
-              damage: e.damage,
-              life: 0,
-              maxLife: 2.8,
-              color: PALETTE.lavender,
-            });
+            if (dist < 125 && (e.aiCooldown ?? 0) <= 0) {
+              e.aiState = 'windup';
+              e.aiTimer = 0.38;
+            }
           }
         } else {
-          e.vx = nx * moveSpd;
-          e.vy = ny * moveSpd;
+          // FAST SWARMERS (Mochi Slime & Mini Mochi): energetic flanking weave & close-range surge
+          const weave = Math.sin(e.walkTime * 3.8 + e.id * 1.7) * 0.28;
+          const surge = dist < 175 ? 1.12 : 1.0;
+          const mvx = nx - ny * weave;
+          const mvy = ny + nx * weave;
+          const mLen = Math.hypot(mvx, mvy) || 1;
+          e.vx = (mvx / mLen) * moveSpd * surge;
+          e.vy = (mvy / mLen) * moveSpd * surge;
         }
 
         e.walkTime += dt;
@@ -1620,6 +2007,63 @@ export class GameEngine {
       const hitDist = p.radius + e.radius - 2;
       if (distSq <= hitDist * hitDist) {
         this.damagePlayer(e.damage);
+      }
+    }
+  }
+
+  /**
+   * Mass-aware circle separation powered by the 64px spatial hash.
+   * Swarmers spread cleanly around packs; heavy brutes resist displacement;
+   * bosses act as immovable anchors (and skip separation while airborne).
+   */
+  private resolveEnemySeparation(): void {
+    const items = this.enemies;
+    const neighbors = this.sepQueryBuf;
+    const strength = 0.42;
+
+    for (let i = 0; i < items.length; i++) {
+      const a = items[i];
+      if (!a.alive) continue;
+      if (a.isBoss && this.bossAI.isAirborne(a.id)) continue;
+
+      const invMassA = a.isBoss ? 0 : a.archetypeId === 'golem' ? 0.35 : 1.0;
+      this.spatialHash.queryRadius(a.x, a.y, a.radius * 2.2, neighbors);
+
+      for (let j = 0; j < neighbors.length; j++) {
+        const b = neighbors[j];
+        if (!b.alive || a.id >= b.id) continue;
+        if (b.isBoss && this.bossAI.isAirborne(b.id)) continue;
+
+        const invMassB = b.isBoss ? 0 : b.archetypeId === 'golem' ? 0.35 : 1.0;
+        const totalInvMass = invMassA + invMassB;
+        if (totalInvMass <= 0) continue;
+
+        const minDist = a.radius + b.radius;
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        const distSq = dx * dx + dy * dy;
+
+        if (distSq < minDist * minDist) {
+          const shareA = invMassA / totalInvMass;
+          const shareB = invMassB / totalInvMass;
+          if (distSq > 0.0001) {
+            const dist = Math.sqrt(distSq);
+            const push = (minDist - dist) * strength;
+            const nx = dx / dist;
+            const ny = dy / dist;
+            a.x += nx * push * shareA;
+            a.y += ny * push * shareA;
+            b.x -= nx * push * shareB;
+            b.y -= ny * push * shareB;
+          } else {
+            const angle = (a.id * 1.61803398875) % (Math.PI * 2);
+            const nudge = minDist * 0.25 * strength;
+            a.x += Math.cos(angle) * nudge * shareA;
+            a.y += Math.sin(angle) * nudge * shareA;
+            b.x -= Math.cos(angle) * nudge * shareB;
+            b.y -= Math.sin(angle) * nudge * shareB;
+          }
+        }
       }
     }
   }
@@ -1652,8 +2096,6 @@ export class GameEngine {
     const p = this.player;
     const pickupRadius = this.computedStats.pickupRadius;
     const pickupRadiusSq = pickupRadius * pickupRadius;
-    const collectRadius = p.radius + 14;
-    const collectRadiusSq = collectRadius * collectRadius;
     const drag = Math.exp(-7 * dt);
 
     for (let i = this.pickups.length - 1; i >= 0; i--) {
@@ -1674,7 +2116,7 @@ export class GameEngine {
 
       if (item.magnetized && distSq > 0.01) {
         const dist = Math.sqrt(distSq);
-        const pullSpd = Math.min(540, 220 + item.age * 160);
+        const pullSpd = Math.min(720, 320 + item.age * 240);
         item.vx = (dx / dist) * pullSpd;
         item.vy = (dy / dist) * pullSpd;
         item.x += item.vx * dt;
@@ -1686,9 +2128,10 @@ export class GameEngine {
         item.vy *= drag;
       }
 
+      const collectR = p.radius + (item.kind === 'chest' ? item.radius + 10 : 14);
       const postDx = p.x - item.x;
       const postDy = p.y - item.y;
-      if (postDx * postDx + postDy * postDy <= collectRadiusSq) {
+      if (postDx * postDx + postDy * postDy <= collectR * collectR) {
         this.collectPickup(item);
         this.pickups.splice(i, 1);
       }
@@ -1755,8 +2198,14 @@ export class GameEngine {
 
     if (item.kind === 'chest') {
       this.healPlayer(Math.round(p.maxHp * 0.35));
+      this.spawnRingParticle(p.x, p.y, PALETTE.butter, 130, 0.5);
+      this.spawnParticles(p.x, p.y, PALETTE.butter, 22, { speedMin: 60, speedMax: 200 });
+      this.spawnFloatingText(p.x, p.y - 36, 'BOSS CHEST!', PALETTE.butter, true);
+
       const ownedSet = new Set(this.ownedArtifacts);
       const available = getAvailableBossArtifacts(p.heroId, ownedSet);
+      this.pendingArtifactChoices = available;
+
       if (this.callbacks.onBossChestCollected) {
         this.audio.playSynergy();
         this.setState('artifact');
@@ -1842,19 +2291,20 @@ export class GameEngine {
     // 1. Tiled pastel ground
     this.renderGround(ctx, camX, camY, width, height);
 
-    // 2. Ground-level combat effects (novas, craters, telegraphs, turrets, trails)
+    // 2. Ground-level combat effects & boss telegraphs (under entities so hero stays clear)
     this.abilityRunner.renderGroundLayer(ctx, toScreen, this.sprites);
+    this.bossAI.renderGroundTelegraphs(ctx, this.enemies, toScreen);
 
     // 3. Pickups (XP gems, Pastel Hearts, Magnet Orbs, Boss Chests)
     this.renderPickups(ctx);
 
-    // 4. Enemies
+    // 4. Enemies & Bosses
     this.renderEnemies(ctx);
 
     // 5. Player
     this.renderPlayer(ctx);
 
-    // 6. Foreground combat visuals (melee arcs, beams, chains, orbits, projectiles)
+    // 6. Foreground combat visuals & ignited boss beams
     this.abilityRunner.renderForegroundLayer(
       ctx,
       this.player.x,
@@ -1862,8 +2312,9 @@ export class GameEngine {
       toScreen,
       this.sprites
     );
+    this.bossAI.renderForegroundEffects(ctx, this.enemies, toScreen);
 
-    // 7. Enemy projectiles
+    // 7. Enemy & Boss projectiles
     this.renderEnemyProjectiles(ctx);
 
     // 8. Pastel particle bursts
@@ -1872,7 +2323,13 @@ export class GameEngine {
     // 9. Floating damage numbers
     this.renderFloatingNumbers(ctx);
 
-    // 10. Aim reticle, floating joystick & pause overlay
+    // 10. Offscreen Boss / Boss Chest directional pointers & Boss arrival banner
+    this.renderOffscreenIndicators(ctx, width, height);
+    if (this.bossAlertTimer > 0) {
+      this.renderBossAlertBanner(ctx, width);
+    }
+
+    // 11. Aim reticle, floating joystick & pause overlay
     if (this.state === 'playing' && this.input.getAimMode() === 'mouse' && this.input.hasMousePosition()) {
       this.renderMouseReticle(ctx);
     }
@@ -1914,7 +2371,7 @@ export class GameEngine {
   }
 
   private renderPickups(ctx: CanvasRenderingContext2D): void {
-    const pad = 40;
+    const pad = 44;
     for (let i = 0; i < this.pickups.length; i++) {
       const item = this.pickups[i];
       const screen = this.worldToScreen(item.x, item.y);
@@ -1928,12 +2385,39 @@ export class GameEngine {
       }
 
       const bob = Math.sin(item.age * 5.2 + i) * 2.5;
-      const scale = item.kind === 'chest' ? 2.5 : item.kind === 'xp_large' ? 2.0 : 1.75;
+      const scale = item.kind === 'chest' ? 2.6 : item.kind === 'xp_large' ? 2.0 : 1.75;
+
+      // Soft pulsing beacon under rare drops & Boss Chests
+      if (item.kind === 'chest' || item.kind === 'heart' || item.kind === 'magnet') {
+        const pulse = 0.5 + 0.5 * Math.sin(item.age * 6.0);
+        const glowColor =
+          item.kind === 'chest'
+            ? PALETTE.butter
+            : item.kind === 'heart'
+            ? PALETTE.rose
+            : PALETTE.periwinkle;
+        const glowR = item.kind === 'chest' ? 24 + pulse * 6 : 14 + pulse * 3;
+        ctx.save();
+        ctx.globalAlpha = item.kind === 'chest' ? 0.34 + pulse * 0.16 : 0.24 + pulse * 0.12;
+        ctx.fillStyle = glowColor;
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y + 2, glowR, 0, Math.PI * 2);
+        ctx.fill();
+        if (item.kind === 'chest') {
+          ctx.globalAlpha = 0.75;
+          ctx.strokeStyle = PALETTE.cream;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(screen.x, screen.y + 2, glowR + 2, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
 
       // Ground shadow
       ctx.fillStyle = PALETTE.shadow;
       ctx.beginPath();
-      ctx.ellipse(screen.x, screen.y + 10, item.kind === 'chest' ? 14 : 7, 3.5, 0, 0, Math.PI * 2);
+      ctx.ellipse(screen.x, screen.y + 10, item.kind === 'chest' ? 15 : 7, 3.5, 0, 0, Math.PI * 2);
       ctx.fill();
 
       drawPixelSprite(
@@ -1949,7 +2433,7 @@ export class GameEngine {
   }
 
   private renderEnemies(ctx: CanvasRenderingContext2D): void {
-    const pad = 64;
+    const pad = 120;
     for (let i = 0; i < this.enemies.length; i++) {
       const e = this.enemies[i];
       if (!e.alive) continue;
@@ -1972,24 +2456,69 @@ export class GameEngine {
           ? this.sprites.bosses[e.bossId][frame]
           : this.sprites.enemies[e.archetypeId][frame];
 
-      // Shadow
+      const bossVis = e.isBoss ? this.bossAI.getVisualState(e.id) : null;
+      const jumpHeight = bossVis ? bossVis.jumpHeight : 0;
+      const shadowScale = Math.max(0.45, 1 - jumpHeight / 220);
+
+      // Ground shadow (shrinks dynamically while King Mochi leaps high)
       ctx.fillStyle = PALETTE.shadow;
       ctx.beginPath();
-      ctx.ellipse(screen.x, screen.y + e.radius + 4, e.radius * 0.9, 5, 0, 0, Math.PI * 2);
+      ctx.ellipse(
+        screen.x,
+        screen.y + e.radius + 4,
+        e.radius * 0.9 * shadowScale,
+        5 * shadowScale,
+        0,
+        0,
+        Math.PI * 2
+      );
       ctx.fill();
 
-      // Sprite with hit flash silhouette
-      drawPixelSprite(
-        ctx,
-        sprite,
-        screen.x,
-        screen.y + bob,
-        scale,
-        e.facingLeft,
-        e.hitFlashTimer > 0
-      );
+      // Enraged pastel aura ring beneath Bosses in Phase 2
+      if (bossVis && bossVis.enraged) {
+        const pulse = 0.5 + 0.5 * Math.sin(this.elapsedRunSec * 8);
+        ctx.save();
+        ctx.globalAlpha = 0.28 + pulse * 0.16;
+        ctx.strokeStyle = bossVis.accentColor;
+        ctx.lineWidth = 3.5;
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y - jumpHeight, e.radius + 10 + pulse * 4, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
 
-      // Freeze / Chill tint halo
+      // Standard enemy attack telegraphs (Wisp charge & Golem lunge brace)
+      if (!e.isBoss && e.aiState === 'windup') {
+        ctx.save();
+        ctx.globalAlpha = 0.7;
+        ctx.strokeStyle = e.archetypeId === 'wisp' ? PALETTE.lavenderLight : PALETTE.peachLight;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y, e.radius + 5, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // Sprite with hit flash silhouette (supports Boss leap height + squash/stretch)
+      if (bossVis && (bossVis.scaleX !== 1 || bossVis.scaleY !== 1)) {
+        ctx.save();
+        ctx.translate(screen.x, screen.y + bob - jumpHeight);
+        ctx.scale(bossVis.scaleX, bossVis.scaleY);
+        drawPixelSprite(ctx, sprite, 0, 0, scale, e.facingLeft, e.hitFlashTimer > 0);
+        ctx.restore();
+      } else {
+        drawPixelSprite(
+          ctx,
+          sprite,
+          screen.x,
+          screen.y + bob - jumpHeight,
+          scale,
+          e.facingLeft,
+          e.hitFlashTimer > 0
+        );
+      }
+
+      // Freeze / Stun status overlays
       if (e.freezeTimer > 0) {
         ctx.save();
         ctx.fillStyle = 'rgba(168, 216, 240, 0.45)';
@@ -2010,8 +2539,23 @@ export class GameEngine {
         ctx.restore();
       }
 
-      // Compact HP bar above damaged enemies
-      if (!e.isBoss && e.hp < e.maxHp) {
+      // World-space Boss HP bar & title plate beneath active Bosses
+      if (e.isBoss && e.bossId) {
+        const bossDef = BOSSES[e.bossId];
+        const bw = 78;
+        const bh = 7;
+        const bx = Math.round(screen.x - bw / 2);
+        const by = Math.round(screen.y + e.radius + 12);
+        const ratio = Math.max(0, Math.min(1, e.hp / Math.max(1, e.maxHp)));
+
+        ctx.fillStyle = PALETTE.outline;
+        ctx.fillRect(bx - 2, by - 2, bw + 4, bh + 4);
+        ctx.fillStyle = PALETTE.creamDark;
+        ctx.fillRect(bx, by, bw, bh);
+        ctx.fillStyle = bossDef.accentColor;
+        ctx.fillRect(bx, by, Math.round(bw * ratio), bh);
+      } else if (!e.isBoss && e.hp < e.maxHp) {
+        // Compact HP bar above damaged standard enemies
         const bw = 26;
         const bh = 4;
         const bx = Math.round(screen.x - bw / 2);
@@ -2028,19 +2572,141 @@ export class GameEngine {
   }
 
   private renderEnemyProjectiles(ctx: CanvasRenderingContext2D): void {
+    const pad = 28;
     for (let i = 0; i < this.enemyProjectiles.length; i++) {
       const proj = this.enemyProjectiles[i];
       const screen = this.worldToScreen(proj.x, proj.y);
+      if (
+        screen.x < -pad ||
+        screen.x > this.viewportWidth + pad ||
+        screen.y < -pad ||
+        screen.y > this.viewportHeight + pad
+      ) {
+        continue;
+      }
+
+      // Color-coded pastel aura so each boss/wisp orb family reads clearly
+      ctx.save();
+      ctx.globalAlpha = 0.42;
+      ctx.fillStyle = proj.color;
+      ctx.beginPath();
+      ctx.arc(screen.x, screen.y, proj.radius + 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+
+      const scale = Math.max(1.6, (proj.radius / 7) * 1.9);
       drawPixelSprite(
         ctx,
         this.sprites.projectiles.enemy_orb,
         screen.x,
         screen.y,
-        1.9,
+        scale,
         false,
         false
       );
     }
+  }
+
+  private renderOffscreenIndicators(
+    ctx: CanvasRenderingContext2D,
+    width: number,
+    height: number
+  ): void {
+    const margin = 28;
+
+    const drawPointer = (wx: number, wy: number, color: string, label: string): void => {
+      const screen = this.worldToScreen(wx, wy);
+      if (
+        screen.x >= margin &&
+        screen.x <= width - margin &&
+        screen.y >= margin &&
+        screen.y <= height - margin
+      ) {
+        return;
+      }
+
+      const cx = width * 0.5;
+      const cy = height * 0.5;
+      const angle = Math.atan2(screen.y - cy, screen.x - cx);
+      const halfW = cx - margin;
+      const halfH = cy - margin;
+      const cos = Math.cos(angle);
+      const sin = Math.sin(angle);
+      const tX = Math.abs(cos) > 0.001 ? halfW / Math.abs(cos) : Number.POSITIVE_INFINITY;
+      const tY = Math.abs(sin) > 0.001 ? halfH / Math.abs(sin) : Number.POSITIVE_INFINITY;
+      const t = Math.min(tX, tY);
+      const px = cx + cos * t;
+      const py = cy + sin * t;
+
+      ctx.save();
+      ctx.translate(px, py);
+      ctx.rotate(angle);
+
+      ctx.fillStyle = color;
+      ctx.strokeStyle = PALETTE.outline;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.moveTo(11, 0);
+      ctx.lineTo(-8, -8);
+      ctx.lineTo(-4, 0);
+      ctx.lineTo(-8, 8);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.rotate(-angle);
+      ctx.font = 'bold 10px ui-monospace, monospace';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.strokeStyle = PALETTE.outline;
+      ctx.lineWidth = 3;
+      ctx.strokeText(label, 0, -16);
+      ctx.fillStyle = PALETTE.cream;
+      ctx.fillText(label, 0, -16);
+      ctx.restore();
+    };
+
+    for (let i = 0; i < this.enemies.length; i++) {
+      const e = this.enemies[i];
+      if (e.alive && e.isBoss && e.bossId) {
+        drawPointer(e.x, e.y, BOSSES[e.bossId].accentColor, 'BOSS');
+      }
+    }
+
+    for (let i = 0; i < this.pickups.length; i++) {
+      const item = this.pickups[i];
+      if (item.kind === 'chest') {
+        drawPointer(item.x, item.y, PALETTE.butter, 'CHEST');
+      }
+    }
+  }
+
+  private renderBossAlertBanner(ctx: CanvasRenderingContext2D, width: number): void {
+    const alpha = Math.min(1, this.bossAlertTimer / 0.55);
+    const bw = Math.min(340, width - 32);
+    const bh = 54;
+    const bx = Math.round(width / 2 - bw / 2);
+    const by = 72;
+
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.94;
+    ctx.fillStyle = PALETTE.cream;
+    ctx.fillRect(bx, by, bw, bh);
+    ctx.fillStyle = this.bossAlertColor;
+    ctx.fillRect(bx, by, bw, 6);
+    ctx.strokeStyle = PALETTE.outline;
+    ctx.lineWidth = 3;
+    ctx.strokeRect(bx, by, bw, bh);
+
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillStyle = PALETTE.outline;
+    ctx.font = 'bold 16px ui-monospace, monospace';
+    ctx.fillText(`BOSS: ${this.bossAlertTitle}`, width / 2, by + 24);
+    ctx.font = '11px ui-monospace, monospace';
+    ctx.fillStyle = PALETTE.slateDark;
+    ctx.fillText(this.bossAlertSubtitle, width / 2, by + 42);
+    ctx.restore();
   }
 
   private renderPlayer(ctx: CanvasRenderingContext2D): void {
@@ -2207,3 +2873,4 @@ export class GameEngine {
 }
 
 export { ARTIFACTS, SYNERGIES };
+export type { BossActiveInfo };

@@ -52,6 +52,12 @@ export interface EnemyEntity extends SpatialEntity {
   burnTickTimer: number;
   burnColor: string;
   rangedCooldown: number;
+  aiState?: 'normal' | 'windup' | 'lunge';
+  aiTimer?: number;
+  aiCooldown?: number;
+  lungeDirX?: number;
+  lungeDirY?: number;
+  bossEncounterIndex?: number;
   alive: boolean;
 }
 
