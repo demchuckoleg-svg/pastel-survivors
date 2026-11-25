@@ -367,6 +367,85 @@ export class UIManager {
     });
   }
 
+  private renderAbilityDetailHtml(heroId: HeroId): string {
+    const cls = CLASSES[heroId];
+    if (!this.selectedAbilityDetail) {
+      return `
+        <div class="ability-detail-hint">
+          Tap any ability icon above to inspect its description, Lv 5 / Lv 10 passives, and synergies.
+        </div>
+      `;
+    }
+
+    const ab = getAbilityDef(this.selectedAbilityDetail);
+    const abIcon = this.game.sprites.iconUrls[ab.iconId];
+    const classSynergies = getSynergiesForClass(cls.id);
+    const matchingSynergies = classSynergies.filter((s) => s.requires.includes(ab.id));
+
+    const synergiesHtml = matchingSynergies
+      .map((syn) => {
+        const partnerId = syn.requires[0] === ab.id ? syn.requires[1] : syn.requires[0];
+        const partner = getAbilityDef(partnerId);
+        return `
+          <div class="ability-detail-synergy-row">
+            <div class="ability-detail-syn-formula">
+              <span class="syn-part owned">
+                <img class="pixel-art" src="${abIcon}" alt="${escapeHtml(ab.name)}" />
+                <span>${escapeHtml(ab.name)}</span>
+              </span>
+              <span class="syn-op">+</span>
+              <span class="syn-part">
+                <img class="pixel-art" src="${this.game.sprites.iconUrls[partner.iconId]}" alt="${escapeHtml(partner.name)}" />
+                <span>${escapeHtml(partner.name)}</span>
+              </span>
+              <span class="syn-op">=</span>
+              <span class="syn-part result">
+                <img class="pixel-art" src="${this.game.sprites.iconUrls[syn.iconId]}" alt="${escapeHtml(syn.name)}" />
+                <span>${escapeHtml(syn.name)}</span>
+              </span>
+            </div>
+            <div class="ability-detail-syn-desc">
+              ${escapeHtml(syn.evolvedSpec.summary)} • <strong>${escapeHtml(syn.bonusPassive.label)}</strong>
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    return `
+      <div class="ability-detail-panel" data-ability-detail-panel>
+        <div class="ability-detail-header">
+          <div class="ability-detail-icon-box" style="background:${ab.color}">
+            <img class="pixel-art" src="${abIcon}" alt="${escapeHtml(ab.name)}" />
+          </div>
+          <div class="ability-detail-heading">
+            <div class="ability-detail-title-row">
+              <h4>${escapeHtml(ab.name)}</h4>
+              ${ab.id === cls.startingAbilityId ? '<span class="px-pill" style="background:var(--butter)">SIGNATURE</span>' : ''}
+            </div>
+            <p class="ability-detail-desc">${escapeHtml(ab.description)}</p>
+          </div>
+        </div>
+
+        <div class="ability-detail-passives">
+          <div class="ability-passive-pill">
+            <span class="ability-passive-lv">LV 5 PASSIVE</span>
+            <span>${escapeHtml(ab.lv5Passive.label)}</span>
+          </div>
+          <div class="ability-passive-pill">
+            <span class="ability-passive-lv">LV 10 PASSIVE</span>
+            <span>${escapeHtml(ab.lv10Passive.label)}</span>
+          </div>
+        </div>
+
+        <div class="ability-detail-synergies">
+          <div class="ability-detail-section-label">Possible Synergies (Lv 10 + Lv 10)</div>
+          ${synergiesHtml || '<div class="ability-detail-syn-desc">No synergies available.</div>'}
+        </div>
+      </div>
+    `;
+  }
+
   private renderHeroDetailModalHtml(heroId: HeroId): string {
     const cls = CLASSES[heroId];
     const sig = getAbilityDef(cls.startingAbilityId);
@@ -375,7 +454,6 @@ export class UIManager {
     const armorPct = Math.round(cls.baseStats.armor * 100);
     const critPct = Math.round(cls.baseStats.critChance * 100);
     const classAbilities = getAbilitiesForClass(cls.id);
-    const classSynergies = getSynergiesForClass(cls.id);
 
     const bestSummary =
       best.runsPlayed > 0
@@ -401,82 +479,6 @@ export class UIManager {
         `;
       })
       .join('');
-
-    let abilityDetailHtml = '';
-    if (this.selectedAbilityDetail) {
-      const ab = getAbilityDef(this.selectedAbilityDetail);
-      const abIcon = this.game.sprites.iconUrls[ab.iconId];
-      const matchingSynergies = classSynergies.filter((s) => s.requires.includes(ab.id));
-
-      const synergiesHtml = matchingSynergies
-        .map((syn) => {
-          const partnerId = syn.requires[0] === ab.id ? syn.requires[1] : syn.requires[0];
-          const partner = getAbilityDef(partnerId);
-          return `
-            <div class="ability-detail-synergy-row">
-              <div class="ability-detail-syn-formula">
-                <span class="syn-part owned">
-                  <img class="pixel-art" src="${abIcon}" alt="${escapeHtml(ab.name)}" />
-                  <span>${escapeHtml(ab.name)}</span>
-                </span>
-                <span class="syn-op">+</span>
-                <span class="syn-part">
-                  <img class="pixel-art" src="${this.game.sprites.iconUrls[partner.iconId]}" alt="${escapeHtml(partner.name)}" />
-                  <span>${escapeHtml(partner.name)}</span>
-                </span>
-                <span class="syn-op">=</span>
-                <span class="syn-part result">
-                  <img class="pixel-art" src="${this.game.sprites.iconUrls[syn.iconId]}" alt="${escapeHtml(syn.name)}" />
-                  <span>${escapeHtml(syn.name)}</span>
-                </span>
-              </div>
-              <div class="ability-detail-syn-desc">
-                ${escapeHtml(syn.evolvedSpec.summary)} • <strong>${escapeHtml(syn.bonusPassive.label)}</strong>
-              </div>
-            </div>
-          `;
-        })
-        .join('');
-
-      abilityDetailHtml = `
-        <div class="ability-detail-panel" data-ability-detail-panel>
-          <div class="ability-detail-header">
-            <div class="ability-detail-icon-box" style="background:${ab.color}">
-              <img class="pixel-art" src="${abIcon}" alt="${escapeHtml(ab.name)}" />
-            </div>
-            <div class="ability-detail-heading">
-              <div class="ability-detail-title-row">
-                <h4>${escapeHtml(ab.name)}</h4>
-                ${ab.id === cls.startingAbilityId ? '<span class="px-pill" style="background:var(--butter)">SIGNATURE</span>' : ''}
-              </div>
-              <p class="ability-detail-desc">${escapeHtml(ab.description)}</p>
-            </div>
-          </div>
-
-          <div class="ability-detail-passives">
-            <div class="ability-passive-pill">
-              <span class="ability-passive-lv">LV 5 PASSIVE</span>
-              <span>${escapeHtml(ab.lv5Passive.label)}</span>
-            </div>
-            <div class="ability-passive-pill">
-              <span class="ability-passive-lv">LV 10 PASSIVE</span>
-              <span>${escapeHtml(ab.lv10Passive.label)}</span>
-            </div>
-          </div>
-
-          <div class="ability-detail-synergies">
-            <div class="ability-detail-section-label">Possible Synergies (Lv 10 + Lv 10)</div>
-            ${synergiesHtml || '<div class="ability-detail-syn-desc">No synergies available.</div>'}
-          </div>
-        </div>
-      `;
-    } else {
-      abilityDetailHtml = `
-        <div class="ability-detail-hint">
-          Tap any ability icon above to inspect its description, Lv 5 / Lv 10 passives, and synergies.
-        </div>
-      `;
-    }
 
     return `
       <div class="hero-detail-backdrop" data-hero-detail-modal>
@@ -522,7 +524,9 @@ export class UIManager {
             <div class="hero-abilities-grid">
               ${abilityTilesHtml}
             </div>
-            ${abilityDetailHtml}
+            <div data-ability-detail-container>
+              ${this.renderAbilityDetailHtml(cls.id)}
+            </div>
           </div>
 
           <div class="hero-detail-footer">
@@ -634,15 +638,22 @@ export class UIManager {
       }
     });
 
-    // Bind 5x2 Ability icon taps
+    // Bind 5x2 Ability icon taps (update in-place so modal scroll position never snaps back)
     const abilityBtns = this.menuLayer.querySelectorAll<HTMLButtonElement>('[data-inspect-ability]');
+    const detailContainer = this.menuLayer.querySelector<HTMLDivElement>('[data-ability-detail-container]');
     abilityBtns.forEach((btn) => {
       btn.addEventListener('click', () => {
         const abId = btn.dataset.inspectAbility as AbilityId;
         this.game.audio.unlock();
         this.game.audio.playClick();
         this.selectedAbilityDetail = this.selectedAbilityDetail === abId ? null : abId;
-        this.renderMainMenu();
+
+        abilityBtns.forEach((b) => {
+          b.classList.toggle('selected', b.dataset.inspectAbility === this.selectedAbilityDetail);
+        });
+        if (detailContainer && this.selectedHeroDetail) {
+          detailContainer.innerHTML = this.renderAbilityDetailHtml(this.selectedHeroDetail);
+        }
       });
     });
 
