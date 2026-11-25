@@ -240,7 +240,7 @@ export class GameEngine {
   public particles: Particle[] = [];
 
   private readonly callbacks: GameEngineCallbacks;
-  private state: GameState = 'playing';
+  private state: GameState = 'menu';
   private viewportWidth = 0;
   private viewportHeight = 0;
   private elapsedRunSec = 0;
@@ -390,6 +390,10 @@ export class GameEngine {
     return this.pendingChoices;
   }
 
+  public getPendingLevelUps(): number {
+    return this.pendingLevelUps;
+  }
+
   public getPendingArtifactChoices(): readonly ArtifactDef[] {
     return this.pendingArtifactChoices;
   }
@@ -519,6 +523,11 @@ export class GameEngine {
   }
 
   public resume(): void {
+    if (this.state === 'paused' && this.pendingLevelUps > 0) {
+      this.pendingLevelUps--;
+      this.openNextLevelUp();
+      return;
+    }
     if (this.state === 'paused' || this.state === 'levelup' || this.state === 'artifact') {
       this.lastTimestamp = performance.now();
       this.setState('playing');
@@ -1667,6 +1676,9 @@ export class GameEngine {
 
     if (this.state === 'playing') {
       this.update(dt);
+    } else if (this.state === 'menu') {
+      this.camera.x += dt * 16;
+      this.camera.y += dt * 8;
     }
 
     this.render();
@@ -2291,6 +2303,10 @@ export class GameEngine {
     // 1. Tiled pastel ground
     this.renderGround(ctx, camX, camY, width, height);
 
+    if (this.state === 'menu') {
+      return;
+    }
+
     // 2. Ground-level combat effects & boss telegraphs (under entities so hero stays clear)
     this.abilityRunner.renderGroundLayer(ctx, toScreen, this.sprites);
     this.bossAI.renderGroundTelegraphs(ctx, this.enemies, toScreen);
@@ -2329,17 +2345,13 @@ export class GameEngine {
       this.renderBossAlertBanner(ctx, width);
     }
 
-    // 11. Aim reticle, floating joystick & pause overlay
+    // 11. Aim reticle & floating joystick
     if (this.state === 'playing' && this.input.getAimMode() === 'mouse' && this.input.hasMousePosition()) {
       this.renderMouseReticle(ctx);
     }
 
     if (this.state === 'playing') {
       this.input.renderJoystick(ctx);
-    }
-
-    if (this.state === 'paused') {
-      this.renderPauseOverlay(ctx, width, height);
     }
   }
 
@@ -2836,38 +2848,6 @@ export class GameEngine {
     ctx.moveTo(x, y + 5);
     ctx.lineTo(x, y + 12);
     ctx.stroke();
-    ctx.restore();
-  }
-
-  private renderPauseOverlay(
-    ctx: CanvasRenderingContext2D,
-    width: number,
-    height: number
-  ): void {
-    ctx.save();
-    ctx.fillStyle = 'rgba(58, 50, 69, 0.28)';
-    ctx.fillRect(0, 0, width, height);
-
-    const boxW = 240;
-    const boxH = 84;
-    const bx = Math.round(width / 2 - boxW / 2);
-    const by = Math.round(height / 2 - boxH / 2);
-
-    ctx.fillStyle = PALETTE.cream;
-    ctx.fillRect(bx, by, boxW, boxH);
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = PALETTE.outline;
-    ctx.strokeRect(bx, by, boxW, boxH);
-
-    ctx.fillStyle = PALETTE.outline;
-    ctx.font = 'bold 20px ui-monospace, monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText('PAUSED', width / 2, by + 32);
-
-    ctx.font = '12px ui-monospace, monospace';
-    ctx.fillStyle = PALETTE.slateDark;
-    ctx.fillText('Press ESC or P to resume', width / 2, by + 58);
     ctx.restore();
   }
 }
