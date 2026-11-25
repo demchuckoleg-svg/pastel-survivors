@@ -1738,3 +1738,404 @@ canvas.pixel-art {
   }
 }
 
+/* ==========================================================================
+   CHARACTER SELECT TILES, HERO DETAIL MODAL & 5x2 ABILITIES GRID
+   ========================================================================== */
+
+.hero-tile-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.hero-select-tile {
+  appearance: none;
+  font-family: inherit;
+  color: var(--outline);
+  background: var(--cream-dark);
+  border: 3px solid var(--outline);
+  box-shadow: 0 4px 0 var(--outline);
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  text-align: center;
+  transition: transform 80ms ease, box-shadow 80ms ease, background-color 120ms ease;
+}
+
+.hero-select-tile:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 0 var(--outline);
+  background: var(--cream);
+}
+
+.hero-select-tile:active {
+  transform: translateY(2px);
+  box-shadow: 0 2px 0 var(--outline);
+}
+
+.hero-select-tile.selected {
+  background: var(--butter);
+}
+
+.hero-tile-avatar {
+  width: 72px;
+  height: 72px;
+  border: 2.5px solid var(--outline);
+  box-shadow: 0 3px 0 var(--outline);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.hero-tile-avatar .class-preview-canvas {
+  width: 52px;
+  height: 52px;
+}
+
+.hero-tile-name {
+  font-size: 16px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+}
+
+.hero-tile-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+
+.hero-tile-meta {
+  font-size: 10px;
+  font-weight: 800;
+  background: var(--cream);
+  border: 1.5px solid var(--outline);
+  padding: 2px 7px;
+  margin-top: 2px;
+}
+
+/* Hero Detail Modal Window */
+.hero-detail-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(58, 50, 69, 0.65);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 14px;
+  z-index: 40;
+}
+
+.hero-detail-window {
+  width: min(680px, 100%);
+  max-height: calc(100vh - 28px);
+  max-height: calc(100dvh - 28px);
+  overflow-y: auto;
+  background: var(--cream);
+  border: 3px solid var(--outline);
+  box-shadow: 0 6px 0 var(--outline);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  touch-action: pan-y;
+}
+
+.hero-detail-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.hero-detail-best-line {
+  font-size: 10px;
+  font-weight: 800;
+  color: var(--text-muted);
+  margin-top: 2px;
+}
+
+/* 5x2 Abilities Tiled Window */
+.hero-abilities-section {
+  background: var(--cream-dark);
+  border: 2.5px solid var(--outline);
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.hero-abilities-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.hero-abilities-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.hero-ability-tile {
+  position: relative;
+  appearance: none;
+  font-family: inherit;
+  color: var(--outline);
+  background: var(--cream);
+  border: 2px solid var(--outline);
+  box-shadow: 0 2px 0 var(--outline);
+  padding: 7px 4px 5px 4px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  cursor: pointer;
+  min-width: 0;
+  transition: transform 70ms ease, background-color 100ms ease;
+}
+
+.hero-ability-tile:hover {
+  transform: translateY(-1px);
+  background: #fffdf5;
+}
+
+.hero-ability-tile.selected {
+  background: var(--lavender);
+  box-shadow: 0 0 0 2px var(--outline) inset, 0 2px 0 var(--outline);
+}
+
+.hero-ability-tile.signature:not(.selected) {
+  background: var(--butter);
+}
+
+.hero-ability-tile img {
+  width: 28px;
+  height: 28px;
+}
+
+.hero-ability-tile-name {
+  font-size: 9px;
+  font-weight: 800;
+  line-height: 1.15;
+  text-align: center;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hero-ability-sig-dot {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--outline);
+}
+
+/* Ability Detail Info Panel below 5x2 grid */
+.ability-detail-hint {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-align: center;
+  padding: 8px;
+  border: 2px dashed rgba(58, 50, 69, 0.25);
+  background: rgba(253, 246, 227, 0.65);
+}
+
+.ability-detail-panel {
+  background: var(--cream);
+  border: 2.5px solid var(--outline);
+  box-shadow: 0 3px 0 var(--outline);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ability-detail-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.ability-detail-icon-box {
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  border: 2px solid var(--outline);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ability-detail-icon-box img {
+  width: 28px;
+  height: 28px;
+}
+
+.ability-detail-heading {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.ability-detail-title-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.ability-detail-title-row h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 900;
+}
+
+.ability-detail-desc {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
+
+.ability-detail-passives {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.ability-passive-pill {
+  background: var(--cream-dark);
+  border: 1.5px solid var(--outline);
+  padding: 5px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.ability-passive-lv {
+  font-size: 9px;
+  font-weight: 900;
+  color: var(--text-muted);
+  letter-spacing: 0.5px;
+}
+
+.ability-detail-synergies {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-top: 6px;
+  border-top: 2px dashed rgba(58, 50, 69, 0.2);
+}
+
+.ability-detail-section-label {
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--text-muted);
+}
+
+.ability-detail-synergy-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ability-detail-syn-formula {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.ability-detail-syn-desc {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+
+.hero-detail-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 2px;
+}
+
+.hero-detail-play-btn {
+  flex: 1;
+  min-height: 44px;
+  font-size: 14px;
+}
+
+@media (max-width: 640px) {
+  .hero-tile-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .hero-select-tile {
+    padding: 10px 6px;
+    gap: 5px;
+  }
+
+  .hero-tile-avatar {
+    width: 54px;
+    height: 54px;
+  }
+
+  .hero-tile-avatar .class-preview-canvas {
+    width: 40px;
+    height: 40px;
+  }
+
+  .hero-tile-name {
+    font-size: 13px;
+  }
+
+  .hero-tile-title {
+    font-size: 9px;
+  }
+
+  .hero-detail-window {
+    padding: 12px;
+    gap: 10px;
+  }
+
+  .hero-abilities-grid {
+    gap: 4px;
+  }
+
+  .hero-ability-tile {
+    padding: 5px 2px 4px 2px;
+  }
+
+  .hero-ability-tile img {
+    width: 24px;
+    height: 24px;
+  }
+
+  .hero-ability-tile-name {
+    font-size: 8px;
+  }
+
+  .ability-detail-passives {
+    grid-template-columns: 1fr;
+  }
+}
+
+

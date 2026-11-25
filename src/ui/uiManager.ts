@@ -1,4 +1,4 @@
-import { ABILITIES, getAbilityDef } from '../data/abilities';
+import { ABILITIES, getAbilitiesForClass, getAbilityDef } from '../data/abilities';
 import { getArtifactDef } from '../data/artifacts';
 import {
   CLASS_LIST,
@@ -8,7 +8,7 @@ import {
 } from '../data/classes';
 import { xpNeeded } from '../data/enemies';
 import { getSynergiesForClass, SYNERGIES } from '../data/synergies';
-import type { ArtifactDef, BossId, HeroId } from '../data/types';
+import type { AbilityId, ArtifactDef, BossId, HeroId } from '../data/types';
 import type {
   GameEngine,
   GameState,
@@ -88,7 +88,7 @@ export class UIManager {
   private hudArtifactsStrip!: HTMLDivElement;
 
   // Menu animated preview canvases
-  private menuPreviewCanvases: Partial<Record<HeroId, HTMLCanvasElement>> = {};
+  private menuPreviewCanvases: Array<{ heroId: HeroId; canvas: HTMLCanvasElement }> = [];
 
   // Dirty-checking cache for HUD DOM updates
   private lastSlotsKey = '';
@@ -107,6 +107,8 @@ export class UIManager {
 
   // Menu, Pause & Debug UI state
   private menuView: MenuView = 'title';
+  private selectedHeroDetail: HeroId | null = null;
+  private selectedAbilityDetail: AbilityId | null = null;
   private confirmResetSave = false;
   private pauseTab: PauseMobileTab = 'stats';
   private pauseConfirmAction: PauseConfirmAction = null;
@@ -175,6 +177,8 @@ export class UIManager {
   public handleStateChange(state: GameState): void {
     if (state === 'menu') {
       this.menuView = 'title';
+      this.selectedHeroDetail = null;
+      this.selectedAbilityDetail = null;
       this.confirmResetSave = false;
       this.pauseConfirmAction = null;
       this.renderMainMenu();
@@ -273,7 +277,7 @@ export class UIManager {
   // ==========================================================================
 
   private renderMainMenu(): void {
-    this.menuPreviewCanvases = {};
+    this.menuPreviewCanvases = [];
     switch (this.menuView) {
       case 'title':
         this.renderTitleView();
@@ -297,7 +301,7 @@ export class UIManager {
     const previewNodes = this.menuLayer.querySelectorAll<HTMLCanvasElement>('[data-hero-preview]');
     previewNodes.forEach((canvas) => {
       const heroId = canvas.dataset.heroPreview as HeroId;
-      this.menuPreviewCanvases[heroId] = canvas;
+      this.menuPreviewCanvases.push({ heroId, canvas });
     });
     this.drawMenuHeroPreviews(0);
   }
@@ -307,6 +311,8 @@ export class UIManager {
       this.game.audio.unlock();
       this.game.audio.playClick();
       this.confirmResetSave = false;
+      this.selectedHeroDetail = null;
+      this.selectedAbilityDetail = null;
       this.menuView = 'title';
       this.renderMainMenu();
     });
@@ -316,25 +322,12 @@ export class UIManager {
     const muted = this.game.audio.isMuted();
     const aimMode = this.game.input.getAimMode();
 
-    const heroParadeHtml = CLASS_LIST.map(
-      (cls) => `
-        <div class="title-hero-badge" style="background:${cls.accentColor}">
-          <canvas class="class-preview-canvas pixel-art" width="16" height="16" data-hero-preview="${cls.id}"></canvas>
-          <span>${escapeHtml(cls.name)}</span>
-        </div>
-      `
-    ).join('');
-
     this.menuLayer.innerHTML = `
       <div class="modal-card title-modal-card">
         <div class="title-screen">
           <div class="title-badge-pill">16x16 PIXEL-ART ROGUELITE</div>
           <h1 class="menu-title title-main-heading">PASTEL SURVIVORS</h1>
           <p class="menu-subtitle">3 Heroes • 30 Abilities • 15 Synergies • 3 Bosses • 9 Artifacts</p>
-
-          <div class="title-hero-parade">
-            ${heroParadeHtml}
-          </div>
 
           <div class="title-nav-stack">
             <button type="button" class="px-btn px-btn-primary title-nav-btn title-play-btn" data-menu-nav="class_select">
@@ -359,8 +352,6 @@ export class UIManager {
       </div>
     `;
 
-    this.bindMenuPreviews();
-
     const navBtns = this.menuLayer.querySelectorAll<HTMLButtonElement>('[data-menu-nav]');
     navBtns.forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -368,43 +359,140 @@ export class UIManager {
         this.game.audio.unlock();
         this.game.audio.playClick();
         this.confirmResetSave = false;
+        this.selectedHeroDetail = null;
+        this.selectedAbilityDetail = null;
         this.menuView = target;
         this.renderMainMenu();
       });
     });
   }
 
-  private renderClassSelectView(): void {
-    const muted = this.game.audio.isMuted();
-    const aimMode = this.game.input.getAimMode();
+  private renderHeroDetailModalHtml(heroId: HeroId): string {
+    const cls = CLASSES[heroId];
+    const sig = getAbilityDef(cls.startingAbilityId);
+    const sigIcon = this.game.sprites.iconUrls[sig.iconId];
+    const best = getBestRun(cls.id);
+    const armorPct = Math.round(cls.baseStats.armor * 100);
+    const critPct = Math.round(cls.baseStats.critChance * 100);
+    const classAbilities = getAbilitiesForClass(cls.id);
+    const classSynergies = getSynergiesForClass(cls.id);
 
-    const cardHtml = CLASS_LIST.map((cls) => {
-      const sig = getAbilityDef(cls.startingAbilityId);
-      const sigIcon = this.game.sprites.iconUrls[sig.iconId];
-      const best = getBestRun(cls.id);
-      const armorPct = Math.round(cls.baseStats.armor * 100);
-      const critPct = Math.round(cls.baseStats.critChance * 100);
+    const bestSummary =
+      best.runsPlayed > 0
+        ? `Best: ${formatTime(best.bestTimeSec)} • LV ${best.bestLevel} • ${best.bestKills} Kills • ${best.bestBosses} Bosses`
+        : 'No runs recorded yet';
 
-      const bestSection =
-        best.runsPlayed > 0
-          ? `<div class="class-best-badges">
-              <span class="class-best-badge">TIME ${formatTime(best.bestTimeSec)}</span>
-              <span class="class-best-badge">LV ${best.bestLevel}</span>
-              <span class="class-best-badge">KILLS ${best.bestKills}</span>
-              <span class="class-best-badge">BOSS ${best.bestBosses}</span>
-            </div>`
-          : `<div class="class-best-empty">No runs recorded yet</div>`;
+    const abilityTilesHtml = classAbilities
+      .map((ab) => {
+        const iconUrl = this.game.sprites.iconUrls[ab.iconId];
+        const isSelected = this.selectedAbilityDetail === ab.id;
+        const isSig = ab.id === cls.startingAbilityId;
+        return `
+          <button
+            type="button"
+            class="hero-ability-tile ${isSelected ? 'selected' : ''} ${isSig ? 'signature' : ''}"
+            data-inspect-ability="${ab.id}"
+            title="${escapeHtml(ab.name)}"
+          >
+            ${isSig ? '<span class="hero-ability-sig-dot" title="Signature Ability">★</span>' : ''}
+            <img class="pixel-art" src="${iconUrl}" alt="${escapeHtml(ab.name)}" />
+            <span class="hero-ability-tile-name">${escapeHtml(ab.name)}</span>
+          </button>
+        `;
+      })
+      .join('');
 
-      return `
-        <div class="class-card" data-class-card="${cls.id}">
-          <div class="class-card-top">
-            <div class="class-preview-box" style="background:${cls.accentColor}">
-              <canvas class="class-preview-canvas pixel-art" width="16" height="16" data-hero-preview="${cls.id}"></canvas>
+    let abilityDetailHtml = '';
+    if (this.selectedAbilityDetail) {
+      const ab = getAbilityDef(this.selectedAbilityDetail);
+      const abIcon = this.game.sprites.iconUrls[ab.iconId];
+      const matchingSynergies = classSynergies.filter((s) => s.requires.includes(ab.id));
+
+      const synergiesHtml = matchingSynergies
+        .map((syn) => {
+          const partnerId = syn.requires[0] === ab.id ? syn.requires[1] : syn.requires[0];
+          const partner = getAbilityDef(partnerId);
+          return `
+            <div class="ability-detail-synergy-row">
+              <div class="ability-detail-syn-formula">
+                <span class="syn-part owned">
+                  <img class="pixel-art" src="${abIcon}" alt="${escapeHtml(ab.name)}" />
+                  <span>${escapeHtml(ab.name)}</span>
+                </span>
+                <span class="syn-op">+</span>
+                <span class="syn-part">
+                  <img class="pixel-art" src="${this.game.sprites.iconUrls[partner.iconId]}" alt="${escapeHtml(partner.name)}" />
+                  <span>${escapeHtml(partner.name)}</span>
+                </span>
+                <span class="syn-op">=</span>
+                <span class="syn-part result">
+                  <img class="pixel-art" src="${this.game.sprites.iconUrls[syn.iconId]}" alt="${escapeHtml(syn.name)}" />
+                  <span>${escapeHtml(syn.name)}</span>
+                </span>
+              </div>
+              <div class="ability-detail-syn-desc">
+                ${escapeHtml(syn.evolvedSpec.summary)} • <strong>${escapeHtml(syn.bonusPassive.label)}</strong>
+              </div>
             </div>
-            <div class="class-name-wrap">
-              <h2 class="class-name">${escapeHtml(cls.name)}</h2>
-              <div class="class-title">${escapeHtml(cls.title)}</div>
+          `;
+        })
+        .join('');
+
+      abilityDetailHtml = `
+        <div class="ability-detail-panel" data-ability-detail-panel>
+          <div class="ability-detail-header">
+            <div class="ability-detail-icon-box" style="background:${ab.color}">
+              <img class="pixel-art" src="${abIcon}" alt="${escapeHtml(ab.name)}" />
             </div>
+            <div class="ability-detail-heading">
+              <div class="ability-detail-title-row">
+                <h4>${escapeHtml(ab.name)}</h4>
+                ${ab.id === cls.startingAbilityId ? '<span class="px-pill" style="background:var(--butter)">SIGNATURE</span>' : ''}
+              </div>
+              <p class="ability-detail-desc">${escapeHtml(ab.description)}</p>
+            </div>
+          </div>
+
+          <div class="ability-detail-passives">
+            <div class="ability-passive-pill">
+              <span class="ability-passive-lv">LV 5 PASSIVE</span>
+              <span>${escapeHtml(ab.lv5Passive.label)}</span>
+            </div>
+            <div class="ability-passive-pill">
+              <span class="ability-passive-lv">LV 10 PASSIVE</span>
+              <span>${escapeHtml(ab.lv10Passive.label)}</span>
+            </div>
+          </div>
+
+          <div class="ability-detail-synergies">
+            <div class="ability-detail-section-label">Possible Synergies (Lv 10 + Lv 10)</div>
+            ${synergiesHtml || '<div class="ability-detail-syn-desc">No synergies available.</div>'}
+          </div>
+        </div>
+      `;
+    } else {
+      abilityDetailHtml = `
+        <div class="ability-detail-hint">
+          Tap any ability icon above to inspect its description, Lv 5 / Lv 10 passives, and synergies.
+        </div>
+      `;
+    }
+
+    return `
+      <div class="hero-detail-backdrop" data-hero-detail-modal>
+        <div class="hero-detail-window">
+          <div class="hero-detail-header">
+            <div class="class-card-top">
+              <div class="class-preview-box" style="background:${cls.accentColor}">
+                <canvas class="class-preview-canvas pixel-art" width="16" height="16" data-hero-preview="${cls.id}"></canvas>
+              </div>
+              <div class="class-name-wrap">
+                <h2 class="class-name">${escapeHtml(cls.name)}</h2>
+                <div class="class-title">${escapeHtml(cls.title)}</div>
+                <div class="hero-detail-best-line">${bestSummary}</div>
+              </div>
+            </div>
+            <button type="button" class="px-btn" data-close-hero-detail>✕ CLOSE</button>
           </div>
 
           <p class="class-desc">${escapeHtml(cls.description)}</p>
@@ -421,31 +509,70 @@ export class UIManager {
           <div class="class-sig-box">
             <img class="pixel-art" src="${sigIcon}" alt="${escapeHtml(sig.name)}" />
             <div class="class-sig-text">
-              <span class="class-sig-label">Signature Ability</span>
-              <span class="class-sig-name">${escapeHtml(sig.name)}</span>
+              <span class="class-sig-label">Signature Starting Ability</span>
+              <span class="class-sig-name">${escapeHtml(sig.name)} — <span style="font-weight:600;color:var(--text-muted)">${escapeHtml(sig.description)}</span></span>
             </div>
           </div>
 
-          <div class="class-best-box">
-            <span class="class-best-title">Best Run (${best.runsPlayed} played)</span>
-            ${bestSection}
+          <div class="hero-abilities-section">
+            <div class="hero-abilities-header">
+              <span>Class Abilities (5 × 2)</span>
+              <span class="px-pill">${classAbilities.length} ABILITIES</span>
+            </div>
+            <div class="hero-abilities-grid">
+              ${abilityTilesHtml}
+            </div>
+            ${abilityDetailHtml}
           </div>
 
-          <button type="button" class="px-btn px-btn-primary class-play-btn" data-start-hero="${cls.id}">
-            PLAY ${escapeHtml(cls.name.toUpperCase())}
-          </button>
+          <div class="hero-detail-footer">
+            <button type="button" class="px-btn" data-close-hero-detail>BACK</button>
+            <button type="button" class="px-btn px-btn-primary hero-detail-play-btn" data-start-hero="${cls.id}">
+              PLAY ${escapeHtml(cls.name.toUpperCase())}
+            </button>
+          </div>
         </div>
+      </div>
+    `;
+  }
+
+  private renderClassSelectView(): void {
+    const muted = this.game.audio.isMuted();
+    const aimMode = this.game.input.getAimMode();
+
+    const tilesHtml = CLASS_LIST.map((cls) => {
+      const best = getBestRun(cls.id);
+      const isSelected = this.selectedHeroDetail === cls.id;
+      return `
+        <button
+          type="button"
+          class="hero-select-tile ${isSelected ? 'selected' : ''}"
+          data-select-hero="${cls.id}"
+        >
+          <div class="hero-tile-avatar" style="background:${cls.accentColor}">
+            <canvas class="class-preview-canvas pixel-art" width="16" height="16" data-hero-preview="${cls.id}"></canvas>
+          </div>
+          <div class="hero-tile-name">${escapeHtml(cls.name)}</div>
+          <div class="hero-tile-title">${escapeHtml(cls.title)}</div>
+          <div class="hero-tile-meta">
+            ${best.runsPlayed > 0 ? `Best ${formatTime(best.bestTimeSec)} • LV ${best.bestLevel}` : 'Tap to inspect'}
+          </div>
+        </button>
       `;
     }).join('');
 
+    const detailModalHtml = this.selectedHeroDetail
+      ? this.renderHeroDetailModalHtml(this.selectedHeroDetail)
+      : '';
+
     this.menuLayer.innerHTML = `
-      <div class="modal-card">
+      <div class="modal-card subview-compact-card">
         <div class="menu-header">
           <div class="subview-title-row">
             <button type="button" class="px-btn" data-menu-back>← BACK</button>
             <div class="menu-title-block">
               <h1 class="menu-title">CHOOSE YOUR HERO</h1>
-              <p class="menu-subtitle">Pick a class to begin your run</p>
+              <p class="menu-subtitle">Tap a hero to inspect stats, abilities, and synergies</p>
             </div>
           </div>
           <div class="menu-header-actions">
@@ -458,26 +585,76 @@ export class UIManager {
           </div>
         </div>
 
-        <div class="class-grid">
-          ${cardHtml}
+        <div class="hero-tile-grid">
+          ${tilesHtml}
         </div>
 
         <div class="menu-footer-hint">
           Desktop: WASD / Arrows to move • M Aim Mode • ESC / P Pause &nbsp;|&nbsp; Mobile: Touch & drag anywhere for floating joystick
         </div>
+
+        ${detailModalHtml}
       </div>
     `;
 
     this.bindMenuPreviews();
     this.bindBackToTitle();
 
-    // Bind Start Class buttons
+    // Bind Hero Tile taps to open Hero Detail Window
+    const tileBtns = this.menuLayer.querySelectorAll<HTMLButtonElement>('[data-select-hero]');
+    tileBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const heroId = btn.dataset.selectHero as HeroId;
+        this.game.audio.unlock();
+        this.game.audio.playClick();
+        this.selectedHeroDetail = heroId;
+        this.selectedAbilityDetail = null;
+        this.renderMainMenu();
+      });
+    });
+
+    // Bind Close Hero Detail buttons & backdrop click
+    const closeBtns = this.menuLayer.querySelectorAll<HTMLButtonElement>('[data-close-hero-detail]');
+    closeBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.game.audio.playClick();
+        this.selectedHeroDetail = null;
+        this.selectedAbilityDetail = null;
+        this.renderMainMenu();
+      });
+    });
+
+    const detailBackdrop = this.menuLayer.querySelector<HTMLDivElement>('[data-hero-detail-modal]');
+    detailBackdrop?.addEventListener('click', (e) => {
+      if (e.target === detailBackdrop) {
+        this.game.audio.playClick();
+        this.selectedHeroDetail = null;
+        this.selectedAbilityDetail = null;
+        this.renderMainMenu();
+      }
+    });
+
+    // Bind 5x2 Ability icon taps
+    const abilityBtns = this.menuLayer.querySelectorAll<HTMLButtonElement>('[data-inspect-ability]');
+    abilityBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const abId = btn.dataset.inspectAbility as AbilityId;
+        this.game.audio.unlock();
+        this.game.audio.playClick();
+        this.selectedAbilityDetail = this.selectedAbilityDetail === abId ? null : abId;
+        this.renderMainMenu();
+      });
+    });
+
+    // Bind Start Class button inside Hero Detail Window
     const startBtns = this.menuLayer.querySelectorAll<HTMLButtonElement>('[data-start-hero]');
     startBtns.forEach((btn) => {
       btn.addEventListener('click', () => {
         const heroId = btn.dataset.startHero as HeroId;
         this.game.audio.unlock();
         this.game.audio.playClick();
+        this.selectedHeroDetail = null;
+        this.selectedAbilityDetail = null;
         this.resetHudCaches();
         this.game.startRun(heroId);
       });
@@ -707,14 +884,12 @@ export class UIManager {
   }
 
   private drawMenuHeroPreviews(frame: 0 | 1): void {
-    for (const cls of CLASS_LIST) {
-      const canvas = this.menuPreviewCanvases[cls.id];
-      if (!canvas) continue;
+    for (const { heroId, canvas } of this.menuPreviewCanvases) {
       const ctx = canvas.getContext('2d');
       if (!ctx) continue;
       ctx.imageSmoothingEnabled = false;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      const sprite = this.game.sprites.heroes[cls.id][frame];
+      const sprite = this.game.sprites.heroes[heroId][frame];
       ctx.drawImage(sprite, 0, frame === 1 ? -1 : 0, 16, 16);
     }
   }
