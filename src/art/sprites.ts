@@ -1,0 +1,2284 @@
+import { PALETTE, PIXEL_CHARS } from './palette';
+
+export type HeroId = 'mage' | 'ranger' | 'knight';
+export type EnemySpriteId = 'slime' | 'golem' | 'wisp' | 'minislime';
+export type BossId = 'king_mochi' | 'lady_wisteria' | 'aegis';
+export type PickupSpriteId = 'xp_small' | 'xp_medium' | 'xp_large' | 'heart' | 'magnet' | 'chest';
+export type ProjectileSpriteId =
+  | 'fireball'
+  | 'ice'
+  | 'lightning'
+  | 'arcane'
+  | 'shadow'
+  | 'bullet'
+  | 'arrow'
+  | 'axe'
+  | 'hammer'
+  | 'spear'
+  | 'enemy_orb';
+export type GroundSpriteId =
+  | 'tile'
+  | 'flower_pink'
+  | 'flower_blue'
+  | 'flower_yellow'
+  | 'clover'
+  | 'pebble'
+  | 'tuft';
+
+export type AbilityIconId =
+  // Mage (10)
+  | 'fireball'
+  | 'wind_blade'
+  | 'ice_shard'
+  | 'frost_nova'
+  | 'chain_lightning'
+  | 'plasma_beam'
+  | 'arcane_orb'
+  | 'shadow_bolt'
+  | 'earth_spike'
+  | 'meteor_rain'
+  // Ranger (10)
+  | 'twin_pistols'
+  | 'homing_arrow'
+  | 'magic_longbow'
+  | 'piercing_rail_bow'
+  | 'shotgun_blast'
+  | 'explosive_crossbow'
+  | 'ricochet_revolver'
+  | 'frost_quiver'
+  | 'gatling_turret'
+  | 'rain_of_arrows'
+  // Knight (10)
+  | 'greatsword_cleave'
+  | 'orbiting_blades'
+  | 'shield_bash'
+  | 'shockwave_stomp'
+  | 'spinning_axe'
+  | 'chain_flail'
+  | 'ground_slam'
+  | 'holy_hammer'
+  | 'spear_thrust'
+  | 'blade_dash';
+
+export type SynergyIconId =
+  // Mage (5)
+  | 'firestorm'
+  | 'absolute_zero'
+  | 'tempest_lance'
+  | 'eclipse_singularity'
+  | 'cataclysm'
+  // Ranger (5)
+  | 'smart_bullets'
+  | 'starlight_railgun'
+  | 'cluster_cannon'
+  | 'glacial_ricochet'
+  | 'artillery_barrage'
+  // Knight (5)
+  | 'whirlwind_tempest'
+  | 'bastion_quake'
+  | 'reapers_pendulum'
+  | 'divine_judgment'
+  | 'valkyrie_blitz';
+
+export type ArtifactIconId =
+  // Mage (3)
+  | 'prismatic_focus'
+  | 'aether_chronometer'
+  | 'mana_conduit'
+  // Ranger (3)
+  | 'quicksilver_quiver'
+  | 'split_fletching_charm'
+  | 'hawkeye_monocle'
+  // Knight (3)
+  | 'valkyrie_crest'
+  | 'titans_gauntlet'
+  | 'retribution_aegis'
+  // Fallback (1)
+  | 'ascended_relic';
+
+export type IconId = AbilityIconId | SynergyIconId | ArtifactIconId;
+
+export interface SpriteAtlas {
+  heroes: Record<HeroId, [HTMLCanvasElement, HTMLCanvasElement]>;
+  enemies: Record<EnemySpriteId, [HTMLCanvasElement, HTMLCanvasElement]>;
+  bosses: Record<BossId, [HTMLCanvasElement, HTMLCanvasElement]>;
+  pickups: Record<PickupSpriteId, HTMLCanvasElement>;
+  projectiles: Record<ProjectileSpriteId, HTMLCanvasElement>;
+  ground: Record<GroundSpriteId, HTMLCanvasElement>;
+  icons: Record<IconId, HTMLCanvasElement>;
+  iconUrls: Record<IconId, string>;
+}
+
+function createCanvas(w: number, h: number): HTMLCanvasElement {
+  const canvas = document.createElement('canvas');
+  canvas.width = w;
+  canvas.height = h;
+  return canvas;
+}
+
+/**
+ * Bakes a pixel-matrix string array onto an offscreen canvas.
+ */
+function bakeMatrix(rows: string[], overrides?: Record<string, string>): HTMLCanvasElement {
+  const h = rows.length;
+  const w = rows[0]?.length ?? 16;
+  const canvas = createCanvas(w, h);
+  const ctx = canvas.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+
+  for (let y = 0; y < h; y++) {
+    const row = rows[y];
+    for (let x = 0; x < row.length; x++) {
+      const ch = row[x];
+      const color = overrides?.[ch] ?? PIXEL_CHARS[ch];
+      if (color) {
+        ctx.fillStyle = color;
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+  }
+  return canvas;
+}
+
+/**
+ * Mirrors a 16-column half-matrix horizontally into a 32x32 boss sprite,
+ * then applies optional asymmetric pixel overlays.
+ */
+function bakeMirrored32(
+  halfRows: string[],
+  overlays?: Array<[number, number, string]>
+): HTMLCanvasElement {
+  const fullRows = halfRows.map((row) => {
+    const padded = row.padEnd(16, '.').slice(0, 16);
+    const reversed = padded.split('').reverse().join('');
+    return padded + reversed;
+  });
+  const canvas = bakeMatrix(fullRows);
+  if (overlays && overlays.length > 0) {
+    const ctx = canvas.getContext('2d')!;
+    for (const [x, y, ch] of overlays) {
+      const color = PIXEL_CHARS[ch];
+      if (color) {
+        ctx.fillStyle = color;
+        ctx.fillRect(x, y, 1, 1);
+      }
+    }
+  }
+  return canvas;
+}
+
+/**
+ * Creates a white/cream silhouette version of a sprite for hit-flash feedback.
+ */
+const flashCache = new WeakMap<HTMLCanvasElement, HTMLCanvasElement>();
+export function getFlashSprite(src: HTMLCanvasElement): HTMLCanvasElement {
+  const cached = flashCache.get(src);
+  if (cached) return cached;
+  const c = createCanvas(src.width, src.height);
+  const ctx = c.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+  ctx.drawImage(src, 0, 0);
+  ctx.globalCompositeOperation = 'source-in';
+  ctx.fillStyle = PALETTE.cream;
+  ctx.fillRect(0, 0, c.width, c.height);
+  flashCache.set(src, c);
+  return c;
+}
+
+/**
+ * Helper to draw a pixel-art sprite centered at (x, y) with optional horizontal flip and hit flash.
+ */
+export function drawPixelSprite(
+  ctx: CanvasRenderingContext2D,
+  sprite: HTMLCanvasElement,
+  x: number,
+  y: number,
+  scale = 2,
+  flipX = false,
+  flash = false
+): void {
+  const img = flash ? getFlashSprite(sprite) : sprite;
+  const w = img.width * scale;
+  const h = img.height * scale;
+  ctx.save();
+  ctx.imageSmoothingEnabled = false;
+  ctx.translate(Math.round(x), Math.round(y));
+  if (flipX) {
+    ctx.scale(-1, 1);
+  }
+  ctx.drawImage(img, Math.round(-w / 2), Math.round(-h / 2), w, h);
+  ctx.restore();
+}
+
+// ============================================================================
+// 1. HEROES (16x16, 2-frame walk)
+// ============================================================================
+
+const HERO_MAGE_0 = [
+  '.......kk.......',
+  '......kllk......',
+  '.....klvllk.....',
+  '....kllllLlk....',
+  '...klyyyyllk....',
+  '..kkllllllkk....',
+  '....kppppk..k...',
+  '....kpkpkp.kyk..',
+  '....kppppk..k...',
+  '...kkllllkk.k...',
+  '..kllcyycllkP...',
+  '..kllccccLlkP...',
+  '...kllllLlk.P...',
+  '...kll..llk.P...',
+  '...kk....kk.....',
+  '................',
+];
+
+const HERO_MAGE_1 = [
+  '................',
+  '.......kk.......',
+  '......kllk......',
+  '.....klvllk.....',
+  '....kllllLlk....',
+  '...klyyyyllk....',
+  '..kkllllllkk.k..',
+  '....kppppk..kyk.',
+  '....kpkpkp...k..',
+  '....kppppk...k..',
+  '...kkllllkk..P..',
+  '..kllcyycllk.P..',
+  '..kllccccLlk.P..',
+  '...kll..llk..P..',
+  '..kk......kk....',
+  '................',
+];
+
+const HERO_RANGER_0 = [
+  '.....kkkkkk.....',
+  '....kmmmmmmk....',
+  '...kmnmmmmMmk...',
+  '...kmmppppmmk...',
+  '...kmpkpkpmk....',
+  '...kmpppppmk....',
+  '...krrrrrrrk....',
+  '..kmmrrrrrmmk...',
+  '..kmymmmmmymk...',
+  '..kmymmmmmymk...',
+  '...kmmMMmmmk....',
+  '...kmm..mmk.....',
+  '...kPP..PPk.....',
+  '...kPP..PPk.....',
+  '...kk....kk.....',
+  '................',
+];
+
+const HERO_RANGER_1 = [
+  '................',
+  '.....kkkkkk.....',
+  '....kmmmmmmk....',
+  '...kmnmmmmMmk...',
+  '...kmmppppmmk...',
+  '...kmpkpkpmk....',
+  '...kmpppppmk....',
+  '...krrrrrrrk....',
+  '..kmmrrrrrmmk...',
+  '..kmymmmmmymk...',
+  '...kmmMMmmmk....',
+  '..kmm....mmk....',
+  '..kPP....PPk....',
+  '..kk......kk....',
+  '................',
+  '................',
+];
+
+const HERO_KNIGHT_0 = [
+  '......krrk......',
+  '.....krrrrk.....',
+  '....kkbbbbkk....',
+  '...kbbibbbbBk...',
+  '...kbbkkkkbBk...',
+  '...kbbkwwkbBk...',
+  '...kbbbbbbBBk...',
+  '..kkbccccccbkk..',
+  '.kbbkccyycckSSk.',
+  '.kbiScccccckSSk.',
+  '.kbbkccCCcckSSk.',
+  '..kkbbbbbbbbkk..',
+  '...kbbB..Bbbk...',
+  '...kSSk..kSSk...',
+  '...kkk....kkk...',
+  '................',
+];
+
+const HERO_KNIGHT_1 = [
+  '................',
+  '......krrk......',
+  '.....krrrrk.....',
+  '....kkbbbbkk....',
+  '...kbbibbbbBk...',
+  '...kbbkkkkbBk...',
+  '...kbbkwwkbBk...',
+  '...kbbbbbbBBk...',
+  '..kkbccccccbkk..',
+  '.kbbkccyycckSSk.',
+  '.kbiScccccckSSk.',
+  '..kkbbbbbbbbkk..',
+  '..kbbB....Bbbk..',
+  '..kSSk....kSSk..',
+  '..kkk......kkk..',
+  '................',
+];
+
+// ============================================================================
+// 2. STANDARD ENEMIES + MINI-SLIME (16x16, 2-frame)
+// ============================================================================
+
+const ENEMY_SLIME_0 = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '.....kkkkkk.....',
+  '...kkooooookk...',
+  '..koowwooooook..',
+  '..koowooooooOk..',
+  '.koorooooooOook.',
+  '.koorkoookroOok.',
+  '.kooooooooOOook.',
+  '.koooOooooOOook.',
+  '..kOOOOOOOOOOk..',
+  '...kkkkkkkkkk...',
+  '................',
+  '................',
+];
+
+const ENEMY_SLIME_1 = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '....kkkkkkkk....',
+  '..kkoooooooOkk..',
+  '.koowwooooooOok.',
+  '.koorkoookroOok.',
+  '.koooooooooOOok.',
+  '.kOOOOOOOOOOOOk.',
+  '..kkkkkkkkkkkk..',
+  '................',
+  '................',
+  '................',
+];
+
+const ENEMY_GOLEM_0 = [
+  '....kkkkkkkk....',
+  '...kSSSSSSSSk...',
+  '..kSSssssssSSk..',
+  '..kSskksskkSSk..',
+  '..kSskyssykSSk..',
+  '.kkSSSSSSSSSSkk.',
+  'kSSsSSSSSSSSsSSk',
+  'kSSsSSkyykSSsSSk',
+  'kSSsSSkyykSSsSSk',
+  'kSSsSSSSSSSSsSSk',
+  'kssskssssssskssk',
+  '.kk.kss..ssk.kk.',
+  '....kss..ssk....',
+  '...kttt..tttk...',
+  '...kkkk..kkkk...',
+  '................',
+];
+
+const ENEMY_GOLEM_1 = [
+  '................',
+  '....kkkkkkkk....',
+  '...kSSSSSSSSk...',
+  '..kSSssssssSSk..',
+  '..kSskksskkSSk..',
+  '..kSskyssykSSk..',
+  '.kkSSSSSSSSSSkk.',
+  'kSSsSSSSSSSSsSSk',
+  'kSSsSSkyykSSsSSk',
+  'kSSsSSkyykSSsSSk',
+  'kssskssssssskssk',
+  '.kk.kss..ssk.kk.',
+  '...kss....ssk...',
+  '..kttt....tttk..',
+  '..kkkk....kkkk..',
+  '................',
+];
+
+const ENEMY_WISP_0 = [
+  '.......kk.......',
+  '......kuuk......',
+  '.....kuuuuk.....',
+  '....kuuwwuuk....',
+  '...kuuuuuuuuk...',
+  '...kuukyykuuk...',
+  '...kuukyykuuk...',
+  '...kuuUUUUuuk...',
+  '....kuuUUuuk....',
+  '.....kkuukk.....',
+  '....k.kuuk.k....',
+  '.....k.kk.k.....',
+  '......k..k......',
+  '.......kk.......',
+  '................',
+  '................',
+];
+
+const ENEMY_WISP_1 = [
+  '................',
+  '.......kk.......',
+  '......kuuk......',
+  '.....kuuuuk.....',
+  '....kuuwwuuk....',
+  '...kuuuuuuuuk...',
+  '...kuukyykuuk...',
+  '...kuukyykuuk...',
+  '...kuuUUUUuuk...',
+  '....kuuUUuuk....',
+  '.....kkuukk.....',
+  '...k..kuuk..k...',
+  '....k..kk..k....',
+  '......k..k......',
+  '................',
+  '................',
+];
+
+const ENEMY_MINISLIME_0 = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '......kkkk......',
+  '....kkppppkk....',
+  '...kpwppppPPk...',
+  '...kppkppkPPk...',
+  '...kppppppPPk...',
+  '....kPPPPPPk....',
+  '.....kkkkkk.....',
+  '................',
+  '................',
+  '................',
+];
+
+const ENEMY_MINISLIME_1 = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '.....kkkkkk.....',
+  '...kkppppppkk...',
+  '..kpwppkppkPPk..',
+  '..kppppppppPPk..',
+  '...kPPPPPPPPk...',
+  '....kkkkkkkk....',
+  '................',
+  '................',
+  '................',
+];
+
+// ============================================================================
+// 3. BOSSES (32x32, 2-frame, mirrored from 16-col half-matrices)
+// ============================================================================
+
+const BOSS_KING_MOCHI_0_HALF = [
+  '................',
+  '.........kk.....',
+  '........kyyk....',
+  '......k.kyyk.k..',
+  '.....kykkyykkyk.',
+  '.....kyyyyyyyyk.',
+  '.....kyryyybyyk.',
+  '.....kYYYYYYYYk.',
+  '....kkkkkkkkkkkk',
+  '...kkooooooooooo',
+  '..koowwooooooooo',
+  '..koowoooooooooo',
+  '.koorooooooooooo',
+  '.koooooooooooooo',
+  '.kooooookkkooooo',
+  '.kooooookwkooooo',
+  '.kooooookkkooooo',
+  '.kooorroooooooko',
+  '.kooorroooooooko',
+  '.koooooooooooooo',
+  '.kooooooooooooOO',
+  '.koooooooooooOOO',
+  '.koooooooooooOOO',
+  '..kOOOOOOOOOOOOO',
+  '..kOOOOOOOOOOOOO',
+  '...kOOOOOOOOOOOO',
+  '....kkkkkkkkkkkk',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+const BOSS_KING_MOCHI_1_HALF = [
+  '................',
+  '................',
+  '.........kk.....',
+  '........kyyk....',
+  '......k.kyyk.k..',
+  '.....kykkyykkyk.',
+  '.....kyyyyyyyyk.',
+  '.....kyryyybyyk.',
+  '.....kYYYYYYYYk.',
+  '...kkkkkkkkkkkkk',
+  '..kkoooooooooooo',
+  '.koowwoooooooooo',
+  '.koowooooooooooo',
+  'kooroooooooooooo',
+  'kooooooooooooooo',
+  'koooooookkkooooo',
+  'koooooookwkooooo',
+  'koooooookkkooooo',
+  'koooorroooooooko',
+  'koooorroooooooko',
+  'koooooooooooooOO',
+  'kooooooooooooOOO',
+  'kooooooooooooOOO',
+  '.kOOOOOOOOOOOOOO',
+  '.kOOOOOOOOOOOOOO',
+  '..kOOOOOOOOOOOOO',
+  '...kkkkkkkkkkkkk',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+const BOSS_LADY_WISTERIA_0_HALF = [
+  '..............kk',
+  '............kkvv',
+  '...........kvvvv',
+  '..........kvlvll',
+  '.......kk.klllll',
+  '......kllkkllllL',
+  '.....kllvllllllL',
+  '....kllvvlllcccc',
+  '....kllllllcckcc',
+  '...kllLllllcckcc',
+  '...kllLlllLccccc',
+  '....kkLLlllLcccc',
+  '.....kkllkllLLLL',
+  '....kllvlkllyyyy',
+  '...kllvvlllllyyy',
+  '..kllvvllllllLLl',
+  '..kllllllllllLLl',
+  '.kllvlllllllllll',
+  '.kllvllllooollll',
+  '..klllllooooolll',
+  '..klllllooooolll',
+  '...kllllllllllll',
+  '...kllLLLLllllLL',
+  '..kllLLLLLllllLL',
+  '..kllLLLLllllLLL',
+  '.kllLLLLllllLLLL',
+  '.kllLLLllllLLLLL',
+  '..kkLLklllLLLLLL',
+  '....kk.kkLLLLkLL',
+  '.........kkkk.kk',
+  '................',
+  '................',
+];
+
+const BOSS_LADY_WISTERIA_1_HALF = [
+  '................',
+  '..............kk',
+  '............kkvv',
+  '...........kvvvv',
+  '..........kvlvll',
+  '......kk..klllll',
+  '.....kllk.kllllL',
+  '....kllvlllllllL',
+  '....kllvvlllcccc',
+  '...klllllllcckcc',
+  '...kllLllllcckcc',
+  '...kllLlllLccccc',
+  '....kkLLlllLcccc',
+  '.....kkllkllLLLL',
+  '...klllvlkllyyyy',
+  '..kllvvllllllyyy',
+  '.kllvvlllllllLLl',
+  '.klllllllllllLLl',
+  '.kllvllllooollll',
+  '..klllllooooolll',
+  '..klllllooooolll',
+  '...kllllllllllll',
+  '..kllLLLLLllllLL',
+  '.kllLLLLLLllllLL',
+  '.kllLLLLLllllLLL',
+  '..kllLLLllllLLLL',
+  '...kkLLklllLLLLL',
+  '.....kk.kkLLLLkL',
+  '..........kkkk.k',
+  '................',
+  '................',
+  '................',
+];
+
+const BOSS_AEGIS_0_HALF = [
+  '............kkkk',
+  '..........kkcccc',
+  '.........kccyycc',
+  '........kccyyyyc',
+  '.......kccbbbbcc',
+  '.......kcbbkkbbc',
+  '.......kcbbkybbc',
+  '.......kcbbbbbbc',
+  '....kkkkccCCCCcc',
+  '..kkbbbbkcccccck',
+  '.kbbibbbkccyycck',
+  '.kbbibbbkcywwyck',
+  'kbbbBBbbkccyycck',
+  'kbbbBBbbkcccccck',
+  'kbbbBBbbkccCCcck',
+  'kbbbBBbbkccbbcck',
+  'kbbbBBbbkccbbcck',
+  'kbbbBBbbkccCCcck',
+  '.kbbBBbbkcccccck',
+  '.kbbBBbbkccyycck',
+  '..kkBBbbkcccccck',
+  '....kkkkkccCCcck',
+  '.......kccbbbbcc',
+  '.......kccbbbbcc',
+  '......kccbbBBbbc',
+  '......kccbb..BBc',
+  '......kccbb..BBc',
+  '......kCCbb..kk.',
+  '......kCCBBk....',
+  '......kkkkkk....',
+  '................',
+  '................',
+];
+
+const BOSS_AEGIS_1_HALF = [
+  '................',
+  '............kkkk',
+  '..........kkcccc',
+  '.........kccyycc',
+  '........kccyyyyc',
+  '.......kccbbbbcc',
+  '.......kcbbkkbbc',
+  '.......kcbbkybbc',
+  '.......kcbbbbbbc',
+  '...kkkkkccCCCCcc',
+  '.kkbbbbbkcccccck',
+  'kbbibbbbkccyycck',
+  'kbbibbbbkcywwyck',
+  'kbbbBBbbkccyycck',
+  'kbbbBBbbkcccccck',
+  'kbbbBBbbkccCCcck',
+  'kbbbBBbbkccbbcck',
+  'kbbbBBbbkccbbcck',
+  'kbbbBBbbkccCCcck',
+  '.kbbBBbbkcccccck',
+  '..kkBBbbkccyycck',
+  '....kkkkkcccccck',
+  '.......kccbbbbcc',
+  '......kccbbbbbbc',
+  '......kccbbBBbbc',
+  '.....kccbb...BBc',
+  '.....kCCbb...kk.',
+  '.....kCCBBk.....',
+  '.....kkkkkk.....',
+  '................',
+  '................',
+  '................',
+];
+
+// ============================================================================
+// 4. PICKUPS (16x16)
+// ============================================================================
+
+const PICKUP_XP_SMALL = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '.......kk.......',
+  '......kmmk......',
+  '.....kmnmmk.....',
+  '....kmwmmmMk....',
+  '....kmmmmmMk....',
+  '.....kmMMMk.....',
+  '......kMMk......',
+  '.......kk.......',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+const PICKUP_XP_MEDIUM = [
+  '................',
+  '................',
+  '.......kk.......',
+  '......kbbk......',
+  '.....kbibbk.....',
+  '....kbiwbbBk....',
+  '...kbbibbbBBk...',
+  '...kbbbbbbBBk...',
+  '...kbbbBBBBBk...',
+  '....kbbBBBBk....',
+  '.....kbBBBk.....',
+  '......kBBk......',
+  '.......kk.......',
+  '................',
+  '................',
+  '................',
+];
+
+const PICKUP_XP_LARGE = [
+  '................',
+  '.......kk.......',
+  '......kllk......',
+  '.....klvllk.....',
+  '....klvwllLk....',
+  '...kllvllllLk...',
+  '..klllyyylllLk..',
+  '..klllywylllLk..',
+  '..klllyyylllLk..',
+  '...klllLLLLLk...',
+  '....kllLLLLk....',
+  '.....klLLLk.....',
+  '......kLLk......',
+  '.......kk.......',
+  '................',
+  '................',
+];
+
+const PICKUP_HEART = [
+  '................',
+  '................',
+  '...kkkk..kkkk...',
+  '..krrrrkkrrrrk..',
+  '.krrwwrrrrrrrRk.',
+  '.krrwrrrrrrrrRk.',
+  '.krrrrrrrrrrrRk.',
+  '.krrrrrrrrrrRRk.',
+  '..krrrrrrrrRRk..',
+  '...krrrrrrRRk...',
+  '....krrrrRRk....',
+  '.....krrRRk.....',
+  '......kRRk......',
+  '.......kk.......',
+  '................',
+  '................',
+];
+
+const PICKUP_MAGNET = [
+  '................',
+  '................',
+  '....kkkkkkkk....',
+  '...krrrrrrrrk...',
+  '..krrbbbbbbRRk..',
+  '..krrbk..kbRRk..',
+  '..krrbk..kbRRk..',
+  '..krrbk..kbRRk..',
+  '..krrbk..kbRRk..',
+  '..krrbk..kbRRk..',
+  '..kSSSk..kSSSk..',
+  '..kyyyk..kyyyk..',
+  '..kyyyk..kyyyk..',
+  '..kkkkk..kkkkk..',
+  '................',
+  '................',
+];
+
+const PICKUP_CHEST = [
+  '................',
+  '................',
+  '...kkkkkkkkkk...',
+  '..kyyppppppyyk..',
+  '.kyppppppppppyk.',
+  '.kypPPPPPPPPpyk.',
+  '.kyyyyyyyyyyyyk.',
+  '.kkkkkkllkkkkkk.',
+  '.kyPPPkllkPPPyk.',
+  '.kyPPPkLLkPPPyk.',
+  '.kyPPPkkkkPPPyk.',
+  '.kyPPPPPPPPPPyk.',
+  '.kYYYYYYYYYYYYk.',
+  '..kkkkkkkkkkkk..',
+  '................',
+  '................',
+];
+
+// ============================================================================
+// 5. PROJECTILES (16x16)
+// ============================================================================
+
+const PROJ_FIREBALL = [
+  '................',
+  '................',
+  '................',
+  '......kkkk......',
+  '....kkrrrrkk....',
+  '...krrpppprrk...',
+  '..krppyyyyppRk..',
+  '..krpyywwyypRk..',
+  '..krppyyyyppRk..',
+  '...krrppppRRk...',
+  '....kkRRRRkk....',
+  '......kkkk......',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+const PROJ_ICE = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '.........kk.....',
+  '.......kkbbk....',
+  '.....kkbiwbbk...',
+  '...kkbbiiwbbBk..',
+  '...kkbbbbbbBBk..',
+  '.....kkbbBBBk...',
+  '.......kkBBk....',
+  '.........kk.....',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+const PROJ_LIGHTNING = [
+  '................',
+  '................',
+  '................',
+  '........kkk.....',
+  '.......kyyk.....',
+  '.....kkywyk.....',
+  '....kyywwyk.....',
+  '...kyyyyyyyyk...',
+  '......kywwyyk...',
+  '......kywykk....',
+  '......kyyk......',
+  '......kkk.......',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+const PROJ_ARCANE = [
+  '................',
+  '................',
+  '................',
+  '......kkkk......',
+  '....kkllllkk....',
+  '...kllvvvvllk...',
+  '..klvvwwwwvLLk..',
+  '..klvvwwwwvLLk..',
+  '..kllvvvvvvLLk..',
+  '...kllLLLLLLk...',
+  '....kkLLLLkk....',
+  '......kkkk......',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+const PROJ_SHADOW = [
+  '................',
+  '................',
+  '................',
+  '......kkkk......',
+  '....kkttttkk....',
+  '...kttLLLLttk...',
+  '..ktLLlwwlLLtk..',
+  '..ktLLlwwlLLtk..',
+  '..kttLLLLLLttk..',
+  '...kttttttttk...',
+  '....kkkkkkkk....',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+const PROJ_BULLET = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '.....kkkkkk.....',
+  '....kyywwyyk....',
+  '...kyywwwwyyk...',
+  '...kyyyyyyYYk...',
+  '....kYYYYYYk....',
+  '.....kkkkkk.....',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+const PROJ_ARROW = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '..........kk....',
+  '..kk......kSk...',
+  '.kmmk.....kSSk..',
+  '.kmmkkkkkkkkSSk.',
+  '..kkccccccccSSk.',
+  '.kmmkkkkkkkkSSk.',
+  '.kmmk.....kSSk..',
+  '..kk......kSk...',
+  '..........kk....',
+  '................',
+  '................',
+  '................',
+];
+
+const PROJ_AXE = [
+  '................',
+  '.....kkkkk......',
+  '....kSSSSSk.....',
+  '...kSSwwSSSk....',
+  '...kSSrrSSSk....',
+  '....kkkPkkk.....',
+  '.......P........',
+  '.......P........',
+  '.......P........',
+  '.......P........',
+  '....kkkPkkk.....',
+  '...kSSrrSSSk....',
+  '...kSSwwSSSk....',
+  '....kSSSSSk.....',
+  '.....kkkkk......',
+  '................',
+];
+
+const PROJ_HAMMER = [
+  '................',
+  '....kkkkkkkk....',
+  '...kyyyyyyyyk...',
+  '..kyywwyywwyyk..',
+  '..kyyyyyyyyyYk..',
+  '...kYYYYYYYYk...',
+  '....kkkPPkkk....',
+  '......kPPk......',
+  '......kPPk......',
+  '......kPPk......',
+  '......kPPk......',
+  '......kPPk......',
+  '......kyyk......',
+  '......kkkk......',
+  '................',
+  '................',
+];
+
+const PROJ_SPEAR = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '..........kkk...',
+  '.........kbbbk..',
+  '..kkkkkkkkbiwbk.',
+  '.kPPPPPPPPbiwwbk',
+  '..kkkkkkkkbiwbk.',
+  '.........kbbbk..',
+  '..........kkk...',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+const PROJ_ENEMY_ORB = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '.....kkkkkk.....',
+  '....koorrook....',
+  '...koowwwrook...',
+  '...koowwwrrOk...',
+  '...koorrrrrOk...',
+  '....kOOOOOOk....',
+  '.....kkkkkk.....',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+// ============================================================================
+// 6. GROUND TILES & DECORATIONS (16x16)
+// ============================================================================
+
+const GROUND_TILE = [
+  'aaaaaaaaaaaaaaaa',
+  'aaaeaaaaaaaaaaaa',
+  'aaaaaaaaaaaaaaaa',
+  'aaaaaaaaaaaeaaaa',
+  'aaaaaaaaaaaaaaaa',
+  'aaaaaeaaaaaaaaaa',
+  'aaaaaaaaaaaaeaaa',
+  'aaaaaaaaaaaaaaaa',
+  'aaeaaaaaaaaaaaaa',
+  'aaaaaaaaaadaaaaa',
+  'aaaaaaaaaaaaaaaa',
+  'aaaaaaaaaaaaeaaa',
+  'aaaaafaaaaaaaaaa',
+  'aaaaaaaaaaaaaaaa',
+  'aaaaaaaaeaaaaaaa',
+  'aaaaaaaaaaaaaaaa',
+];
+
+const DECOR_FLOWER_PINK = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '......oo........',
+  '.....ooyo.......',
+  '......oo........',
+  '.......g........',
+  '......gg........',
+  '.......g........',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+const DECOR_FLOWER_BLUE = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '.......bb.......',
+  '......bcbc......',
+  '.......bb.......',
+  '.......g........',
+  '.......gg.......',
+  '.......g........',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+const DECOR_FLOWER_YELLOW = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '......yy........',
+  '.....ywwy.......',
+  '......yy........',
+  '.......g........',
+  '......gg........',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+const DECOR_CLOVER = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '......mm........',
+  '.....mGGm.......',
+  '....mmGGmm......',
+  '.....mGGm.......',
+  '.......G........',
+  '.......G........',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+const DECOR_PEBBLE = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '.....ccc........',
+  '....cCCCS.......',
+  '.....SSS..cc....',
+  '.........cCS....',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+const DECOR_TUFT = [
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '.....g...g......',
+  '.....gg.gg......',
+  '....gGGgGGg.....',
+  '.....GGGGG......',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+  '................',
+];
+
+// ============================================================================
+// 7. 16x16 UI ICONS (30 Abilities + 15 Synergies + 9 Artifacts + 1 Relic)
+// ============================================================================
+
+const ICON_MATRICES: Record<IconId, string[]> = {
+  // --- MAGE ABILITIES (10) ---
+  fireball: [
+    '................',
+    '........kk......',
+    '.......krrk.....',
+    '......krrppk....',
+    '....kkrrppyk....',
+    '...krrppyyyk....',
+    '..krppyyyyppk...',
+    '..krpyywwyypk...',
+    '..krppyyyyppk...',
+    '..krrppppppRk...',
+    '...krrppppRRk...',
+    '....kkRRRRkk....',
+    '......kkkk......',
+    '................',
+    '................',
+    '................',
+  ],
+  wind_blade: [
+    '................',
+    '..........kkk...',
+    '........kkmmmk..',
+    '......kkmnnnmmk.',
+    '....kkmnnwwnnmk.',
+    '...kmmnwwnnmmMk.',
+    '..kmmnnmmMMMMk..',
+    '..kmmnmmMMMkk...',
+    '...kmmMMMkk.....',
+    '....kMMkk.......',
+    '...kkmmk........',
+    '..kmmMkk........',
+    '...kkk..........',
+    '................',
+    '................',
+    '................',
+  ],
+  ice_shard: [
+    '................',
+    '...........kk...',
+    '..........kbbk..',
+    '.........kbiwbk.',
+    '........kbiwbbk.',
+    '.......kbiwbbBk.',
+    '......kbiwbbBk..',
+    '.....kbiwbbBk...',
+    '....kbiwbbBk....',
+    '...kbbibbBk.....',
+    '..kbbbbbBk......',
+    '..kbbbbBk.......',
+    '...kBBBk........',
+    '....kkk.........',
+    '................',
+    '................',
+  ],
+  frost_nova: [
+    '.......kk.......',
+    '......kbbk......',
+    '..kk..kbiBk..kk.',
+    '.kbbk.kbiBk.kbbk',
+    '..kbbkkbiBkkbbk.',
+    '...kbiwwwwibk...',
+    '.kkbbiwwwwibbkk.',
+    'kbbiwwwwwwwwibbk',
+    '.kkbbiwwwwibbkk.',
+    '...kbiwwwwibk...',
+    '..kbbkkbiBkkbbk.',
+    '.kbbk.kbiBk.kbbk',
+    '..kk..kbiBk..kk.',
+    '......kBBk......',
+    '.......kk.......',
+    '................',
+  ],
+  chain_lightning: [
+    '................',
+    '.........kkkk...',
+    '........kyyyk...',
+    '.......kywwyk...',
+    '......kywwyk....',
+    '.....kyyyyyyyk..',
+    '....kyyywwyyyk..',
+    '........kywwyk..',
+    '.......kywwyk...',
+    '......kyyyyyyk..',
+    '.....kyywwyyk...',
+    '........kyyk....',
+    '.......kyyk.....',
+    '......kkkk......',
+    '................',
+    '................',
+  ],
+  plasma_beam: [
+    '................',
+    '................',
+    '................',
+    '....kk..........',
+    '...kllk.........',
+    '..klvvlkkkkkkkk.',
+    '.klvwwwwwwwwwwbk',
+    '.klvwwwwwwwwwwbk',
+    '.klvwwwwwwwwwwbk',
+    '..klvvlkkkkkkkk.',
+    '...kllk.........',
+    '....kk..........',
+    '................',
+    '................',
+    '................',
+    '................',
+  ],
+  arcane_orb: [
+    '................',
+    '.....kkkkkk.....',
+    '...kkllllllkk...',
+    '..kllvvvvvvllk..',
+    '.klvvwwwwwvllLk.',
+    '.klvwwllwwvllLk.',
+    '.klvwwllwwvllLk.',
+    '.klvvwwwwwvllLk.',
+    '.kllvvvvvvlllLk.',
+    '..kllLLLLLLLLk..',
+    '...kkLLLLLLkk...',
+    '.....kkkkkk.....',
+    '..k..........k..',
+    '.kyk........kyk.',
+    '..k..........k..',
+    '................',
+  ],
+  shadow_bolt: [
+    '................',
+    '................',
+    '.........kkkk...',
+    '.......kkttttk..',
+    '.....kkttLLLLtk.',
+    '....kttLLlvvLLtk',
+    '...kttLLlwwvlLtk',
+    '..kttLLLlvvLLLtk',
+    '..ktttLLLLLLtttk',
+    '...kkttttttttkk.',
+    '..kttkkkkkkkk...',
+    '.kttk...........',
+    '..kk............',
+    '................',
+    '................',
+    '................',
+  ],
+  earth_spike: [
+    '................',
+    '.......kk.......',
+    '......kPPk......',
+    '.....kPppPk.....',
+    '.....kPppPk.....',
+    '....kPPppPPk....',
+    '...kkPppppPkk...',
+    '..kPPkPppPkPPk..',
+    '..kPpkPppPkpPk..',
+    '.kPPpkPppPkpPPk.',
+    '.kPPPkkPPkkPPPk.',
+    '.kPPPPPPPPPPPPk.',
+    '.kttttttttttttk.',
+    '..kkkkkkkkkkkk..',
+    '................',
+    '................',
+  ],
+  meteor_rain: [
+    '................',
+    '..........kk....',
+    '........kkrrk...',
+    '.......krrppk...',
+    '......krrppyk...',
+    '....kkrrppyk....',
+    '...krrppykk.....',
+    '..kPPrrppk......',
+    '.kPPPppyyPk.....',
+    '.kPPpyywwPPk....',
+    '.kPPppyyPPPk....',
+    '.kPPPPPPPPtk....',
+    '..kPPtttttk.....',
+    '...kkkkkkk......',
+    '................',
+    '................',
+  ],
+
+  // --- RANGER ABILITIES (10) ---
+  twin_pistols: [
+    '................',
+    '................',
+    '..kkkkkkkkkk....',
+    '.kSSwwwwSSSSk...',
+    '.kSSSSSSSSSSk...',
+    '..kkkkkPPk......',
+    '......kPPk......',
+    '......kkkk......',
+    '....kkkkkkkkkk..',
+    '...kSSwwwwSSSSk.',
+    '...kSSSSSSSSSSk.',
+    '....kkkkkPPk....',
+    '........kPPk....',
+    '........kkkk....',
+    '................',
+    '................',
+  ],
+  homing_arrow: [
+    '................',
+    '..........kkk...',
+    '.........kmmmk..',
+    '........kmnnmmk.',
+    '....kkkkkmnwmmk.',
+    '...kmmmmmkkmmk..',
+    '..kmmkkkkk.kk...',
+    '..kmmk..........',
+    '..kmmk..........',
+    '...kmmk.........',
+    '....kmmk........',
+    '....kppk........',
+    '...kppppk.......',
+    '....kkkk........',
+    '................',
+    '................',
+  ],
+  magic_longbow: [
+    '................',
+    '.....kkkk.......',
+    '....kPPppk......',
+    '...kPPkcck......',
+    '..kPPk.kck......',
+    '..kPPk.kck.kk...',
+    '..kPPk.kckkbbk..',
+    '..kPPkkkkkbiwbk.',
+    '..kPPk.kckkbbk..',
+    '..kPPk.kck.kk...',
+    '..kPPk.kck......',
+    '...kPPkcck......',
+    '....kPPppk......',
+    '.....kkkk.......',
+    '................',
+    '................',
+  ],
+  piercing_rail_bow: [
+    '................',
+    '....kkkk........',
+    '...kbbBBk.......',
+    '..kbbkcck.......',
+    '..kbbk.kk...kk..',
+    '.kbbk..kbbkkbbk.',
+    '.kbbkkkkwwwwwwbk',
+    '.kbbkkkkwwwwwwbk',
+    '.kbbk..kbbkkbbk.',
+    '..kbbk.kk...kk..',
+    '..kbbkcck.......',
+    '...kbbBBk.......',
+    '....kkkk........',
+    '................',
+    '................',
+    '................',
+  ],
+  shotgun_blast: [
+    '................',
+    '...........kk...',
+    '..........kyyk..',
+    '.........krrkk..',
+    '..kkkkkk........',
+    '.kSSSSSSk..kk...',
+    '.kSSssSSk.kyyk..',
+    '.kPPkkkk..krrk..',
+    '.kPPk...........',
+    '..kk.....krrkk..',
+    '..........kyyk..',
+    '...........kk...',
+    '................',
+    '................',
+    '................',
+    '................',
+  ],
+  explosive_crossbow: [
+    '................',
+    '.......kk.......',
+    '......kPPk......',
+    '....kkPPPPkk....',
+    '...kPPkrrkPPk...',
+    '..kPPkrrppkPPk..',
+    '..kPkkryyyrkkPk.',
+    '...kkkrrrrrkkk..',
+    '......kPPk......',
+    '......kPPk......',
+    '......kPPk......',
+    '.....kPPPPk.....',
+    '.....kkkkkk.....',
+    '................',
+    '................',
+    '................',
+  ],
+  ricochet_revolver: [
+    '................',
+    '..........kk....',
+    '.........kyyk...',
+    '........kyk.kk..',
+    '.......kyk..kyk.',
+    '..kkkkkkkk......',
+    '.kSSwwwwSSk.....',
+    '.kSSyySSSSk.....',
+    '..kkkkkPPk......',
+    '......kPPk......',
+    '.....kPPPk......',
+    '.....kkkkk......',
+    '................',
+    '................',
+    '................',
+    '................',
+  ],
+  frost_quiver: [
+    '................',
+    '.....kk..kk.....',
+    '....kbbkkbbk....',
+    '...kbiwbbiwBk...',
+    '....kbbbbbbk....',
+    '....kPPbbPPk....',
+    '...kPPPPPPPPk...',
+    '...kPPbbbbPPk...',
+    '...kPPPPPPPPk...',
+    '....kPPbbPPk....',
+    '....kPPPPPPk....',
+    '.....kPPPPk.....',
+    '.....kkkkkk.....',
+    '................',
+    '................',
+    '................',
+  ],
+  gatling_turret: [
+    '................',
+    '................',
+    '....kkkkkkkk....',
+    '...kSSSSSSSSk...',
+    '..kSSwwSSSSSSkk.',
+    '..kSSSSSSSSSSSk.',
+    '..kSSyySSSSSSkk.',
+    '...kSSSSSSSSk...',
+    '....kkkSSkkk....',
+    '......kSSk......',
+    '.....kSSSSk.....',
+    '....kSSkkSSk....',
+    '...kSSk..kSSk...',
+    '...kkk....kkk...',
+    '................',
+    '................',
+  ],
+  rain_of_arrows: [
+    '................',
+    '..kk...kk...kk..',
+    '.kmmk.kmmk.kmmk.',
+    '..kck..kck..kck.',
+    '..kck..kck..kck.',
+    '..kck..kck..kck.',
+    '..kck..kck..kck.',
+    '..kck..kck..kck.',
+    '.kSSSkkSSSkkSSSk',
+    '..kSk..kSk..kSk.',
+    '...k....k....k..',
+    '................',
+    '................',
+    '................',
+    '................',
+    '................',
+  ],
+
+  // --- KNIGHT ABILITIES (10) ---
+  greatsword_cleave: [
+    '................',
+    '...........kkk..',
+    '..........kSSSk.',
+    '.........kSSwwk.',
+    '........kSSwwSk.',
+    '.......kSSwwSk..',
+    '......kSSwwSk...',
+    '.....kSSwwSk....',
+    '...kkSSwwSk.....',
+    '..kyySSwSk......',
+    '...kkyykk.......',
+    '...kPPyyk.......',
+    '..kPPk.kk.......',
+    '..kkk...........',
+    '................',
+    '................',
+  ],
+  orbiting_blades: [
+    '................',
+    '......kkkk......',
+    '.....kSSwwk.....',
+    '......kSSk......',
+    '.......kk.......',
+    '..kk........kk..',
+    '.kSSk..kk..kSSk.',
+    '.kwwk.kbbk.kwwk.',
+    '.kSSk..kk..kSSk.',
+    '..kk........kk..',
+    '.......kk.......',
+    '......kSSk......',
+    '.....kwwSSk.....',
+    '......kkkk......',
+    '................',
+    '................',
+  ],
+  shield_bash: [
+    '................',
+    '...kkkkkkkkkk...',
+    '..kbbbbbbbbbbk..',
+    '.kbbiiyyyyiibbk.',
+    '.kbbibyyyybibbk.',
+    '.kbbibyyyybibbk.',
+    '.kbbibyyyybibbk.',
+    '.kbbiiyyyyiibbk.',
+    '..kbbbyyyybbBk..',
+    '..kbbbbbbbbbBk..',
+    '...kbbbbbbbBk...',
+    '....kbbbbbBk....',
+    '.....kbbbBk.....',
+    '......kBBk......',
+    '.......kk.......',
+    '................',
+  ],
+  shockwave_stomp: [
+    '................',
+    '.....kkkkkk.....',
+    '....kSSSSSSk....',
+    '....kSSwwSSk....',
+    '....kSSSSSSk....',
+    '....kSSssSSk....',
+    '....kSSSSSSk....',
+    '....kSSssSSkk...',
+    '....kSSSSSSSSk..',
+    '....kkkkkkkkkk..',
+    '..kk........kk..',
+    '.kyyk.kkkk.kyyk.',
+    '..kk.kyyyyk.kk..',
+    '......kkkk......',
+    '................',
+    '................',
+  ],
+  spinning_axe: [
+    '................',
+    '....kkkkkk......',
+    '...kSSSSSSk.....',
+    '..kSSwwrrSSk....',
+    '..kSSwwrrSSk....',
+    '...kkkPPkkk.....',
+    '......kPPk......',
+    '......kPPk......',
+    '......kPPk......',
+    '......kPPk......',
+    '...kkkPPkkk.....',
+    '..kSSrrwwSSk....',
+    '..kSSrrwwSSk....',
+    '...kSSSSSSk.....',
+    '....kkkkkk......',
+    '................',
+  ],
+  chain_flail: [
+    '................',
+    '.........kkkk...',
+    '.......kkSSSSk..',
+    '......kSSwwwwSk.',
+    '.....kSSwwSSSSSk',
+    '.....kSSSSSSSSSk',
+    '......kSSssssSk.',
+    '.......kkSSSSk..',
+    '......kSkkkkk...',
+    '.....kSk........',
+    '....kSk.........',
+    '...kPPk.........',
+    '..kPPk..........',
+    '..kkk...........',
+    '................',
+    '................',
+  ],
+  ground_slam: [
+    '................',
+    '......kkkk......',
+    '.....kSSSSk.....',
+    '.....kSwwSk.....',
+    '......kSSk......',
+    '.......kk.......',
+    '...k........k...',
+    '..kPk..kk..kPk..',
+    '.kPPk.kPPk.kPPk.',
+    '.kPpk.kPpk.kPpk.',
+    'kPPppkPPppkPPppk',
+    'kPPPPPPPPPPPPPPk',
+    '.kkkkkkkkkkkkkk.',
+    '................',
+    '................',
+    '................',
+  ],
+  holy_hammer: [
+    '................',
+    '...kkkkkkkkkk...',
+    '..kyyyyyyyyyyk..',
+    '.kyywwyyyywwyyk.',
+    '.kyywwyyyywwyyk.',
+    '.kyyyyyyyyyyyYk.',
+    '..kYYYYYYYYYYk..',
+    '...kkkkPPkkkk...',
+    '......kPPk......',
+    '......kPPk......',
+    '......kPPk......',
+    '......kPPk......',
+    '.....kyyyyk.....',
+    '......kkkk......',
+    '................',
+    '................',
+  ],
+  spear_thrust: [
+    '................',
+    '............kk..',
+    '..........kkbbk.',
+    '.........kbiwwbk',
+    '........kbiwbbbk',
+    '.......kbbbbbkk.',
+    '......kPPkkk....',
+    '.....kPPk.......',
+    '....kPPk........',
+    '...kPPk.........',
+    '..kPPk..........',
+    '.kPPk...........',
+    '.kkk............',
+    '................',
+    '................',
+    '................',
+  ],
+  blade_dash: [
+    '................',
+    '..........kkk...',
+    '.........kbbbk..',
+    '........kbiwwbk.',
+    '..kkkk.kbiwbbk..',
+    '.kbbbkkbiwbbk...',
+    '..kkkkbiwbbk....',
+    '....kbiwbbk.....',
+    '..kkbbbbbkk.....',
+    '.kbbkkyyk.......',
+    '..kk.kPPk.......',
+    '....kPPk........',
+    '....kkk.........',
+    '................',
+    '................',
+    '................',
+  ],
+
+  // --- MAGE SYNERGIES (5) ---
+  firestorm: [
+    '................',
+    '....kkkkkkkk....',
+    '..kkrrppyyrrkk..',
+    '.krrppyyyyppRRk.',
+    '.krpyywwwwyypRk.',
+    '..kkrrppppRRkk..',
+    '...krrppppRRk...',
+    '....krrppRRk....',
+    '...krrppyyRRk...',
+    '....krrppRRk....',
+    '.....krrRRk.....',
+    '......krrk......',
+    '.......kk.......',
+    '................',
+    '................',
+    '................',
+  ],
+  absolute_zero: [
+    '.......kk.......',
+    '......kibk......',
+    '..kk..kwwk..kk..',
+    '.kibk.kwwk.kibk.',
+    '..kibkkwwkkibk..',
+    '...kwwwwwwwwk...',
+    '.kkbwwwwwwwwbkk.',
+    'kiwwwwbbbbwwwwik',
+    '.kkbwwwwwwwwbkk.',
+    '...kwwwwwwwwk...',
+    '..kibkkwwkkibk..',
+    '.kibk.kwwk.kibk.',
+    '..kk..kwwk..kk..',
+    '......kBBk......',
+    '.......kk.......',
+    '................',
+  ],
+  tempest_lance: [
+    '................',
+    '............kk..',
+    '..........kkyyk.',
+    '........kkywwyk.',
+    '......kkywwbbyk.',
+    '....kkywwbbyyk..',
+    '..kkywwbbyykk...',
+    '.kyywbbyykk.....',
+    '.kywwbyyk.......',
+    '..kyyykk........',
+    '...kkk..........',
+    '......kk...kk...',
+    '.....kyyk.kbbk..',
+    '......kk...kk...',
+    '................',
+    '................',
+  ],
+  eclipse_singularity: [
+    '................',
+    '.....kkkkkk.....',
+    '...kkllllllkk...',
+    '..kllvvvvvvllk..',
+    '.klvvkkkkkkvvLk.',
+    '.klvkkttttkkvLk.',
+    '.klvkttttttkvlk.',
+    '.klvkttttttkvlk.',
+    '.klvkkttttkkvLk.',
+    '.klvvkkkkkkvvLk.',
+    '..kllvvvvvvLLk..',
+    '...kkLLLLLLkk...',
+    '.....kkkkkk.....',
+    '................',
+    '................',
+    '................',
+  ],
+  cataclysm: [
+    '................',
+    '......kkkk......',
+    '....kkrrrrkk....',
+    '...krrppyyrrk...',
+    '..krppyyyyppRk..',
+    '..krpyywwyypRk..',
+    '...krrppppRRk...',
+    '....kkPPPPkk....',
+    '..kk.kPPPPk.kk..',
+    '.kPPkkPPPPkkPPk.',
+    '.kPppkPppPkppPk.',
+    'kPPppPPPPPPppPPk',
+    'kPPPPPPPPPPPPPPk',
+    '.kkkkkkkkkkkkkk.',
+    '................',
+    '................',
+  ],
+
+  // --- RANGER SYNERGIES (5) ---
+  smart_bullets: [
+    '................',
+    '......kkkk......',
+    '....kkmmmmkk....',
+    '...kmmkkkkmmk...',
+    '..kmkk....kkmk..',
+    '..kmk..kk..kmk..',
+    '..kmk.kyyk.kmk..',
+    '..kmk.kwwk.kmk..',
+    '..kmk.kyyk.kmk..',
+    '..kmk..kk..kmk..',
+    '..kmkk....kkmk..',
+    '...kmmkkkkmmk...',
+    '....kkmmmmkk....',
+    '......kkkk......',
+    '................',
+    '................',
+  ],
+  starlight_railgun: [
+    '................',
+    '.......kk.......',
+    '......kyyk......',
+    '.....kywwyk.....',
+    '....kkywwykk....',
+    '.kkkbbwwwwbbkkk.',
+    'kbbwwwwwwwwwwbbk',
+    'kbbwwwwwwwwwwbbk',
+    '.kkkbbwwwwbbkkk.',
+    '....kkywwykk....',
+    '.....kywwyk.....',
+    '......kyyk......',
+    '.......kk.......',
+    '................',
+    '................',
+    '................',
+  ],
+  cluster_cannon: [
+    '................',
+    '........kk..kk..',
+    '.......krrkkrrk.',
+    '.......krrppyyk.',
+    '........kkrrkk..',
+    '..kkkkkkk.......',
+    '.kSSSSSSSk..kk..',
+    '.kSSyySSSk.krrk.',
+    '.kSSSSSSSk.kyyk.',
+    '..kkkkkkk...kk..',
+    '.......krrkk....',
+    '.......kyyk.....',
+    '........kk......',
+    '................',
+    '................',
+    '................',
+  ],
+  glacial_ricochet: [
+    '................',
+    '.........kk.....',
+    '........kibk....',
+    '.......kiwk.kk..',
+    '......kiwk..kibk',
+    '..kk.kiwk...kwwk',
+    '.kibkkwk.....kk.',
+    '.kwwk...........',
+    '..kk..kk........',
+    '.....kibk.......',
+    '....kiwwbk......',
+    '.....kibk.......',
+    '......kk........',
+    '................',
+    '................',
+    '................',
+  ],
+  artillery_barrage: [
+    '................',
+    '..kk...kk...kk..',
+    '.kyyk.kyyk.kyyk.',
+    '..kk...kk...kk..',
+    '................',
+    '....kkkkkkkk....',
+    '...kSSSSSSSSk...',
+    '..kSSwwyySSSSk..',
+    '..kSSSSSSSSSSk..',
+    '...kkkSSSSkkk...',
+    '.....kSSSSk.....',
+    '....kSSkkSSk....',
+    '...kSSk..kSSk...',
+    '...kkk....kkk...',
+    '................',
+    '................',
+  ],
+
+  // --- KNIGHT SYNERGIES (5) ---
+  whirlwind_tempest: [
+    '................',
+    '....kkkkkkkk....',
+    '..kkbbwwwwbbkk..',
+    '.kbbwwkkkkwwbbk.',
+    '.kbwk.kSSk.kwbk.',
+    '.kbk.kSSwwk.kbk.',
+    '.kbk.kSSwwk.kbk.',
+    '.kbk..kSSk..kbk.',
+    '.kbwk..kk..kwbk.',
+    '.kbbwwkkkkwwbbk.',
+    '..kkbbwwwwbbkk..',
+    '....kkkkkkkk....',
+    '................',
+    '................',
+    '................',
+    '................',
+  ],
+  bastion_quake: [
+    '................',
+    '...kkkkkkkkkk...',
+    '..kbbbbbbbbbbk..',
+    '.kbbiiyyyyiibbk.',
+    '.kbbibyyyybibbk.',
+    '..kbbbyyyybbBk..',
+    '...kbbbbbbbBk...',
+    '....kbbbbbBk....',
+    '.....kbbbbk.....',
+    '......kkkk......',
+    '..kk........kk..',
+    '.kyyk.kkkk.kyyk.',
+    '..kk.kyyyyk.kk..',
+    '......kkkk......',
+    '................',
+    '................',
+  ],
+  reapers_pendulum: [
+    '................',
+    '....kkkkkkkk....',
+    '...kllllllllk...',
+    '..kllwwwwwwllk..',
+    '..kllwwkkwwllk..',
+    '..kllwk..kwllk..',
+    '...kkk.kk.kkk...',
+    '......kSSk......',
+    '.....kSSk.......',
+    '....kPPk........',
+    '...kPPk.........',
+    '..kPPk..........',
+    '..kkk...........',
+    '................',
+    '................',
+    '................',
+  ],
+  divine_judgment: [
+    '................',
+    '...kkkkkkkkkk...',
+    '..kyywwwwwwyyk..',
+    '.kyywwyyyywwyyk.',
+    '.kyyyyyyyyyyyYk.',
+    '..kYYYYYYYYYYk..',
+    '...kkkkPPkkkk...',
+    '......kPPk......',
+    '......kPPk......',
+    '..kk..kPPk..kk..',
+    '.kyykkPPPPkkyyk.',
+    '..kkyyyyyyyykk..',
+    '....kkkkkkkk....',
+    '................',
+    '................',
+    '................',
+  ],
+  valkyrie_blitz: [
+    '................',
+    '..kk........kk..',
+    '.kwwk......kbbk.',
+    '.kwwwk....kbiwbk',
+    '..kwwwk..kbiwbbk',
+    '...kwwwkkbiwbbk.',
+    '....kwwkbiwbbk..',
+    '.....kkbiwbbk...',
+    '.....kbbbbbkk...',
+    '....kPPkkkk.....',
+    '...kPPk.........',
+    '..kPPk..........',
+    '..kkk...........',
+    '................',
+    '................',
+    '................',
+  ],
+
+  // --- BOSS ARTIFACTS (9 + 1 Ascended Relic) ---
+  prismatic_focus: [
+    '................',
+    '.......kk.......',
+    '......kwwk......',
+    '.....krrbbk.....',
+    '....krrwwbbk....',
+    '...kllwwwwyyk...',
+    '..kllwwmmwwyyk..',
+    '..kllwwmmwwyyk..',
+    '...kllwwwwyyk...',
+    '....krrwwbbk....',
+    '.....krrbbk.....',
+    '......kwwk......',
+    '.......kk.......',
+    '................',
+    '................',
+    '................',
+  ],
+  aether_chronometer: [
+    '................',
+    '.....kkkkkk.....',
+    '......kyyk......',
+    '....kkyyyykk....',
+    '...kyyccccyyk...',
+    '..kycckbbkccyk..',
+    '..kycckbbkccyk..',
+    '..kycckbbbccyk..',
+    '..kycckkkkccyk..',
+    '..kyccccccccyk..',
+    '...kyyccccyyk...',
+    '....kkYYYYkk....',
+    '......kkkk......',
+    '................',
+    '................',
+    '................',
+  ],
+  mana_conduit: [
+    '................',
+    '......kkkk......',
+    '.....kbbbbk.....',
+    '....kbiwwbbk....',
+    '....kbbbbbbk....',
+    '.....kBBBBk.....',
+    '......kllk......',
+    '.....kllllk.....',
+    '....kllvvllk....',
+    '....kllvvllk....',
+    '.....kllllk.....',
+    '......kLLk......',
+    '.....kLLLLk.....',
+    '.....kkkkkk.....',
+    '................',
+    '................',
+  ],
+  quicksilver_quiver: [
+    '................',
+    '.....kk..kk.....',
+    '....kmmkkmmk....',
+    '...kmnwmmnwMk...',
+    '....kmmmmmmk....',
+    '....kSSmmSSk....',
+    '...kSSwwwwSSk...',
+    '...kSSSSSSSSk...',
+    '...kSSmmmmSSk...',
+    '....kSSSSSSk....',
+    '....kSSssSSk....',
+    '.....kssssk.....',
+    '.....kkkkkk.....',
+    '................',
+    '................',
+    '................',
+  ],
+  split_fletching_charm: [
+    '................',
+    '..kk........kk..',
+    '.kmmk......kmmk.',
+    '..kmmk....kmmk..',
+    '...kmmk..kmmk...',
+    '....kmmkkmmk....',
+    '.....kyyyyk.....',
+    '....kyywwyyk....',
+    '.....kyyyyk.....',
+    '......kPPk......',
+    '......kPPk......',
+    '......kPPk......',
+    '......kkkk......',
+    '................',
+    '................',
+    '................',
+  ],
+  hawkeye_monocle: [
+    '................',
+    '....kkkkkkkk....',
+    '...kyyyyyyyyk...',
+    '..kyybbbbbbYyk..',
+    '..kybbwwwwbbYk..',
+    '..kybbwbbwbbYk..',
+    '..kybbbbbbbbYk..',
+    '..kyybbbbbbYyk..',
+    '...kyyyyyyyyk...',
+    '....kkkkkkkkk...',
+    '...........kyk..',
+    '............kyk.',
+    '............kyk.',
+    '.............kk.',
+    '................',
+    '................',
+  ],
+  valkyrie_crest: [
+    '................',
+    '.kk..........kk.',
+    'kwwk...kk...kwwk',
+    'kwwwk.krrk.kwwwk',
+    '.kwwwkrrrrkwwwk.',
+    '.kwwwkrrrrkwwwk.',
+    '..kwwkyyyykwwk..',
+    '...kkkywwwykkk..',
+    '.....kyyyyk.....',
+    '.....krrrrk.....',
+    '......krrk......',
+    '.......kk.......',
+    '................',
+    '................',
+    '................',
+    '................',
+  ],
+  titans_gauntlet: [
+    '................',
+    '....kkkkkkkk....',
+    '...kSSkSSkSSk...',
+    '..kSSSkSSkSSSk..',
+    '..kSSwwSSSSSSk..',
+    '..kSSSSSSSSSSk..',
+    '.kSSySSSSSSySSk.',
+    '.kSSyySSSSyySSk.',
+    '..kSSSSSSSSSSk..',
+    '...kSSssssSSk...',
+    '...kSSssssSSk...',
+    '...kyyyyyyyyk...',
+    '...kkkkkkkkkk...',
+    '................',
+    '................',
+    '................',
+  ],
+  retribution_aegis: [
+    '................',
+    '...kkkkkkkkkk...',
+    '..krrrrrrrrrrk..',
+    '.krrxxyyyyxxrrk.',
+    '.krrxryyyyyrxrk.',
+    '.krrxrywwyrxrrk.',
+    '.krrxryyyyyrxrk.',
+    '.krrxxyyyyxxrrk.',
+    '..krrryyyyrrRk..',
+    '...krrrrrrrRk...',
+    '....krrrrrRk....',
+    '.....krrrRk.....',
+    '......kRRk......',
+    '.......kk.......',
+    '................',
+    '................',
+  ],
+  ascended_relic: [
+    '................',
+    '.......kk.......',
+    '......kyyk......',
+    '.....kywwyk.....',
+    '....kyywwyyk....',
+    '..kkyywwwwyykk..',
+    '.kyywwwwwwwwyyk.',
+    '.kyywwllllwwyyk.',
+    '.kyywwwwwwwwyyk.',
+    '..kkyywwwwyykk..',
+    '....kyywwyyk....',
+    '.....kywwyk.....',
+    '......kyyk......',
+    '.......kk.......',
+    '................',
+    '................',
+  ],
+};
+
+// ============================================================================
+// SINGLETON ATLAS BAKERY & CACHED DATA URLS
+// ============================================================================
+
+let atlasInstance: SpriteAtlas | null = null;
+const spriteUrlCache = new WeakMap<HTMLCanvasElement, string>();
+
+export function initSprites(): SpriteAtlas {
+  if (atlasInstance) return atlasInstance;
+
+  const heroes: Record<HeroId, [HTMLCanvasElement, HTMLCanvasElement]> = {
+    mage: [bakeMatrix(HERO_MAGE_0), bakeMatrix(HERO_MAGE_1)],
+    ranger: [bakeMatrix(HERO_RANGER_0), bakeMatrix(HERO_RANGER_1)],
+    knight: [bakeMatrix(HERO_KNIGHT_0), bakeMatrix(HERO_KNIGHT_1)],
+  };
+
+  const enemies: Record<EnemySpriteId, [HTMLCanvasElement, HTMLCanvasElement]> = {
+    slime: [bakeMatrix(ENEMY_SLIME_0), bakeMatrix(ENEMY_SLIME_1)],
+    golem: [bakeMatrix(ENEMY_GOLEM_0), bakeMatrix(ENEMY_GOLEM_1)],
+    wisp: [bakeMatrix(ENEMY_WISP_0), bakeMatrix(ENEMY_WISP_1)],
+    minislime: [bakeMatrix(ENEMY_MINISLIME_0), bakeMatrix(ENEMY_MINISLIME_1)],
+  };
+
+  const bosses: Record<BossId, [HTMLCanvasElement, HTMLCanvasElement]> = {
+    king_mochi: [
+      bakeMirrored32(BOSS_KING_MOCHI_0_HALF),
+      bakeMirrored32(BOSS_KING_MOCHI_1_HALF),
+    ],
+    lady_wisteria: [
+      bakeMirrored32(BOSS_LADY_WISTERIA_0_HALF),
+      bakeMirrored32(BOSS_LADY_WISTERIA_1_HALF),
+    ],
+    aegis: [bakeMirrored32(BOSS_AEGIS_0_HALF), bakeMirrored32(BOSS_AEGIS_1_HALF)],
+  };
+
+  const pickups: Record<PickupSpriteId, HTMLCanvasElement> = {
+    xp_small: bakeMatrix(PICKUP_XP_SMALL),
+    xp_medium: bakeMatrix(PICKUP_XP_MEDIUM),
+    xp_large: bakeMatrix(PICKUP_XP_LARGE),
+    heart: bakeMatrix(PICKUP_HEART),
+    magnet: bakeMatrix(PICKUP_MAGNET),
+    chest: bakeMatrix(PICKUP_CHEST),
+  };
+
+  const projectiles: Record<ProjectileSpriteId, HTMLCanvasElement> = {
+    fireball: bakeMatrix(PROJ_FIREBALL),
+    ice: bakeMatrix(PROJ_ICE),
+    lightning: bakeMatrix(PROJ_LIGHTNING),
+    arcane: bakeMatrix(PROJ_ARCANE),
+    shadow: bakeMatrix(PROJ_SHADOW),
+    bullet: bakeMatrix(PROJ_BULLET),
+    arrow: bakeMatrix(PROJ_ARROW),
+    axe: bakeMatrix(PROJ_AXE),
+    hammer: bakeMatrix(PROJ_HAMMER),
+    spear: bakeMatrix(PROJ_SPEAR),
+    enemy_orb: bakeMatrix(PROJ_ENEMY_ORB),
+  };
+
+  const ground: Record<GroundSpriteId, HTMLCanvasElement> = {
+    tile: bakeMatrix(GROUND_TILE),
+    flower_pink: bakeMatrix(DECOR_FLOWER_PINK),
+    flower_blue: bakeMatrix(DECOR_FLOWER_BLUE),
+    flower_yellow: bakeMatrix(DECOR_FLOWER_YELLOW),
+    clover: bakeMatrix(DECOR_CLOVER),
+    pebble: bakeMatrix(DECOR_PEBBLE),
+    tuft: bakeMatrix(DECOR_TUFT),
+  };
+
+  const icons = {} as Record<IconId, HTMLCanvasElement>;
+  const iconUrls = {} as Record<IconId, string>;
+
+  for (const id of Object.keys(ICON_MATRICES) as IconId[]) {
+    const canvas = bakeMatrix(ICON_MATRICES[id]);
+    icons[id] = canvas;
+    iconUrls[id] = canvas.toDataURL('image/png');
+  }
+
+  atlasInstance = {
+    heroes,
+    enemies,
+    bosses,
+    pickups,
+    projectiles,
+    ground,
+    icons,
+    iconUrls,
+  };
+
+  return atlasInstance;
+}
+
+export function getSprites(): SpriteAtlas {
+  return initSprites();
+}
+
+export function getIconDataUrl(id: IconId): string {
+  return initSprites().iconUrls[id];
+}
+
+export function getSpriteDataUrl(canvas: HTMLCanvasElement): string {
+  const cached = spriteUrlCache.get(canvas);
+  if (cached) return cached;
+  const url = canvas.toDataURL('image/png');
+  spriteUrlCache.set(canvas, url);
+  return url;
+}

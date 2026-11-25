@@ -1,0 +1,70 @@
+:root {
+  --ground-base: #d8e8d4;
+  --ground-alt: #cde0c8;
+  --lavender: #c5b4e3;
+  --lavender-dark: #9d88c4;
+  --peach: #f7c5a8;
+  --baby-blue: #a8d8f0;
+  --coral: #f29ca3;
+  --cream: #fdf6e3;
+  --cream-dark: #ebe0c5;
+  --butter: #f7e6a8;
+  --mint: #a8e6cf;
+  --outline: #3a3245;
+  --shadow: rgba(58, 50, 69, 0.22);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--ground-base);
+  color: var(--outline);
+  font-family: ui-monospace, 'Cascadia Mono', 'Segoe UI Mono', 'SFMono-Regular',
+    Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  overscroll-behavior: none;
+}
+
+#app {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  touch-action: none;
+}
+
+#game-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+  touch-action: none;
+}
+
+#ui-root {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  padding: env(safe-area-inset-top) env(safe-area-inset-right)
+    env(safe-area-inset-bottom) env(safe-area-inset-left);
+}
+
+img.pixel-art,
+canvas.pixel-art {
+  image-rendering: pixelated;
+  image-rendering: crisp-edges;
+}
