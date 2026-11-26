@@ -88,6 +88,7 @@ export const REVIVE_DURATION_SEC = 10.0;
 export const REVIVE_HP_RATIO = 0.2;
 export const BOSS_KILL_REVIVE_HP_RATIO = 0.5;
 export const REVIVE_INVULN_SEC = 2.0;
+export const UPGRADE_INVULN_SEC = 2.0;
 export const GHOST_DRIFT_SPEED_MULT = 0.35;
 
 export interface PlayerInitConfig {
@@ -820,6 +821,9 @@ export class GameSimulation {
       this.advanceChoiceQueueAfterPick(p, chosen);
     } else {
       p.pendingArtifactChoices = [];
+      if (!p.downed && p.alive) {
+        p.invulnTimer = Math.max(p.invulnTimer, UPGRADE_INVULN_SEC);
+      }
       if (!this.asyncLevelUps && this.state === 'artifact') {
         if (p.pendingChoiceQueue.length > 0) {
           this.openHeadBatchForSolo(p);
@@ -936,6 +940,10 @@ export class GameSimulation {
   }
 
   private advanceChoiceQueueAfterPick(p: PlayerState, pickedChoice?: LevelUpChoice): void {
+    if (!p.downed && p.alive) {
+      p.invulnTimer = Math.max(p.invulnTimer, UPGRADE_INVULN_SEC);
+    }
+
     if (p.pendingChoiceQueue.length > 0) {
       // Refresh the newly active batch so all 3 choices reflect the player's latest build
       p.pendingChoiceQueue[0] = refreshPendingChoiceBatch(p, p.pendingChoiceQueue[0], this.rng);
@@ -1475,6 +1483,7 @@ export class GameSimulation {
       enemy.burnTimer = Math.max(enemy.burnTimer, opts.burnDuration);
       enemy.burnDps = Math.max(enemy.burnDps, opts.burnDps);
       enemy.burnColor = opts.burnColor ?? PALETTE.coral;
+      enemy.burnSourcePlayerId = attacker.id;
     }
     if (opts.armorShredDuration && opts.armorShredDuration > 0) {
       enemy.armorShredTimer = Math.max(enemy.armorShredTimer, opts.armorShredDuration);
@@ -2230,6 +2239,7 @@ export class GameSimulation {
           e.burnTickTimer = 0.4;
           const tickDmg = Math.max(1, e.burnDps * 0.4);
           this.damageEnemy(e, tickDmg, {
+            playerId: e.burnSourcePlayerId,
             color: e.burnColor,
             silent: true,
           });

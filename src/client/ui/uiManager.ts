@@ -33,6 +33,7 @@ import {
   setNickname,
   setServerUrlOverride,
   type AimMode,
+  type TeammateEffectsMode,
 } from '../engine/storage';
 import { resolveDefaultWsUrl, type NetConnectionState } from '../netClient';
 
@@ -1731,6 +1732,19 @@ export class UIManager {
     }
   }
 
+  private formatTeammateEffectsLabel(mode: TeammateEffectsMode): string {
+    return mode === 'full' ? 'FULL' : mode === 'dimmed' ? 'DIMMED' : 'OFF';
+  }
+
+  private updateTeammateEffectsButton(mode: TeammateEffectsMode): void {
+    const btn = this.pauseLayer.querySelector<HTMLButtonElement>('[data-pause-teammate-fx]');
+    if (!btn) return;
+    btn.textContent = `TEAMMATE EFFECTS: ${this.formatTeammateEffectsLabel(mode)}`;
+    btn.classList.toggle('px-btn-mint', mode === 'full');
+    btn.classList.toggle('px-btn-lavender', mode === 'dimmed');
+    btn.classList.toggle('px-btn-coral', mode === 'off');
+  }
+
   private updateHud(force = false): void {
     const isCoop = this.game.isCoopMode();
     const heroId = this.game.getLocalHeroId();
@@ -2260,6 +2274,7 @@ export class UIManager {
     const ownedSynergies = this.game.getOwnedSynergies();
     const muted = this.game.audio.isMuted();
     const aimMode = this.game.input.getAimMode();
+    const teammateFx = this.game.getTeammateEffectsMode();
 
     const cdrPct = Math.round((1 - stats.cooldownMult) * 100);
     const statRows: Array<[string, string]> = [
@@ -2402,6 +2417,15 @@ export class UIManager {
             }
             <button type="button" class="px-btn ${aimMode === 'mouse' ? 'px-btn-blue' : ''}" data-pause-aim>
               AIM: ${aimMode === 'mouse' ? 'MOUSE' : 'AUTO'}
+            </button>
+            <button type="button" class="px-btn ${
+              teammateFx === 'full'
+                ? 'px-btn-mint'
+                : teammateFx === 'dimmed'
+                ? 'px-btn-lavender'
+                : 'px-btn-coral'
+            }" data-pause-teammate-fx title="Toggle Co-op Teammate Projectile & Ability Opacity (Full / Dimmed / Off)">
+              TEAMMATE EFFECTS: ${this.formatTeammateEffectsLabel(teammateFx)}
             </button>
             <button type="button" class="px-btn ${muted ? 'px-btn-coral' : 'px-btn-butter'}" data-pause-mute>
               ${muted ? 'SFX: OFF' : 'SFX: ON'}
@@ -2566,6 +2590,13 @@ export class UIManager {
       this.game.audio.unlock();
       const next = this.game.input.toggleAimMode();
       this.updateAimButtons(next);
+    });
+
+    this.pauseLayer.querySelector('[data-pause-teammate-fx]')?.addEventListener('click', () => {
+      this.game.audio.unlock();
+      this.game.audio.playClick();
+      const next = this.game.cycleTeammateEffectsMode();
+      this.updateTeammateEffectsButton(next);
     });
 
     this.pauseLayer.querySelector('[data-pause-mute]')?.addEventListener('click', () => {

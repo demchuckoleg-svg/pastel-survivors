@@ -69,7 +69,13 @@ import { CoopVfxSystem } from './coopVfx';
 import { InputManager } from './input';
 import { AbilityRenderer } from './renderer/abilityRenderer';
 import { BossRenderer } from './renderer/bossRenderer';
-import { recordRunResult, type AimMode } from './storage';
+import {
+  getTeammateEffectsPreference,
+  recordRunResult,
+  setTeammateEffectsPreference,
+  type AimMode,
+  type TeammateEffectsMode,
+} from './storage';
 
 export type {
   BossActiveInfo,
@@ -291,6 +297,7 @@ export class GameEngine {
     this.sprites = initSprites();
     this.audio = new AudioManager();
     this.sim = new GameSimulation();
+    this.coopVfx.setTeammateEffectsMode(getTeammateEffectsPreference());
 
     this.net = new NetClient({
       onConnectionStateChange: (st) => this.callbacks.onCoopConnectionChange?.(st),
@@ -344,6 +351,23 @@ export class GameEngine {
 
   public isCoopPauseOpen(): boolean {
     return this.sessionMode === 'coop' && this.coopPauseOpen;
+  }
+
+  public getTeammateEffectsMode(): TeammateEffectsMode {
+    return this.coopVfx.getTeammateEffectsMode();
+  }
+
+  public setTeammateEffectsMode(mode: TeammateEffectsMode): void {
+    this.coopVfx.setTeammateEffectsMode(mode);
+    setTeammateEffectsPreference(mode);
+  }
+
+  public cycleTeammateEffectsMode(): TeammateEffectsMode {
+    const curr = this.coopVfx.getTeammateEffectsMode();
+    const next: TeammateEffectsMode =
+      curr === 'full' ? 'dimmed' : curr === 'dimmed' ? 'off' : 'full';
+    this.setTeammateEffectsMode(next);
+    return next;
   }
 
   public getCoopConnectionState(): NetConnectionState {
@@ -962,7 +986,11 @@ export class GameEngine {
       switch (ev.type) {
         case 'AbilityFired': {
           this.coopVfx.spawnFromAbilityFired(ev, players, enemies);
-          if (ev.isDoubleCast) {
+          const selfSlotId = this.coopWorld?.selfSlotId ?? this.net.getSlotId();
+          if (
+            ev.isDoubleCast &&
+            (ev.playerId === selfSlotId || this.coopVfx.getTeammateEffectsMode() !== 'off')
+          ) {
             this.spawnRingParticle(ev.x, ev.y, PALETTE.babyBlue, 38, 0.25);
           }
           break;
@@ -970,25 +998,33 @@ export class GameEngine {
 
         case 'DamageNumber': {
           this.net.triggerEnemyHitFlash(ev.enemyId, 0.11);
-          this.spawnFloatingText(
-            ev.x + (Math.random() - 0.5) * 14,
-            ev.y - 16,
-            ev.shattered ? `${ev.amount}!` : `${ev.amount}`,
-            ev.shattered ? PALETTE.babyBlueLight : ev.isCrit ? PALETTE.butter : PALETTE.cream,
-            ev.isCrit || ev.shattered
-          );
-          this.spawnParticles(
-            ev.x,
-            ev.y,
-            ev.shattered ? PALETTE.babyBlueLight : PALETTE.cream,
-            ev.isCrit || ev.shattered ? 6 : 3,
-            {
-              speedMin: 35,
-              speedMax: 110,
-              sizeMin: 3,
-              sizeMax: 5,
-            }
-          );
+          const selfSlotId = this.coopWorld?.selfSlotId ?? this.net.getSlotId();
+          const isOwnHit =
+            ev.playerId !== undefined && ev.playerId !== 0 && ev.playerId === selfSlotId;
+          // Suppress floating damage numbers from teammates' hits to keep mobile FPS crisp
+          if (isOwnHit) {
+            this.spawnFloatingText(
+              ev.x + (Math.random() - 0.5) * 14,
+              ev.y - 16,
+              ev.shattered ? `${ev.amount}!` : `${ev.amount}`,
+              ev.shattered ? PALETTE.babyBlueLight : ev.isCrit ? PALETTE.butter : PALETTE.cream,
+              ev.isCrit || ev.shattered
+            );
+          }
+          if (isOwnHit || this.coopVfx.getTeammateEffectsMode() !== 'off') {
+            this.spawnParticles(
+              ev.x,
+              ev.y,
+              ev.shattered ? PALETTE.babyBlueLight : PALETTE.cream,
+              isOwnHit ? (ev.isCrit || ev.shattered ? 6 : 3) : 2,
+              {
+                speedMin: 35,
+                speedMax: 110,
+                sizeMin: 3,
+                sizeMax: 5,
+              }
+            );
+          }
           if (!ev.silent) {
             // Only play hit SFX for impacts near our camera so far-off teammates stay clean
             const nearCam =
@@ -1804,7 +1840,7 @@ export class GameEngine {
   }
 
   // ==========================================================================
-  // SOLO OFFLINE RENDERING PIPELINE (UNTOUCHED)
+  // SOLO OFFLINE RENDERING PIPELINE (EXPLICIT 6-LAYER Z-ORDER)
   // ==========================================================================
 
   private renderSolo(): void {
@@ -1819,41 +1855,30 @@ export class GameEngine {
     ctx.fillStyle = PALETTE.groundBase;
     ctx.fillRect(0, 0, width, height);
 
+    // Layer 1: Ground / arena floor & XP crystals / pickups
     this.renderGround(ctx, camX, camY, width, height);
 
     const state = this.sim.getState();
     if (state === 'menu') {
       return;
     }
+    this.renderPickups(ctx);
 
+    // Layer 2: Player ground zones / auras (Healing Mist, pools, novas, trails, strike ground marks)
     for (const runner of this.sim.abilityRunners.values()) {
-      this.abilityRenderer.renderGroundLayer(
+      this.abilityRenderer.renderPlayerGroundZones(
         runner.getRenderState(),
         ctx,
         toScreen,
         this.sprites
       );
     }
-    this.bossRenderer.renderGroundTelegraphs(
-      ctx,
-      this.sim.enemies,
-      (id) => this.sim.bossAI.getRuntime(id),
-      toScreen
-    );
 
-    this.renderPickups(ctx);
-    this.renderEnemies(ctx);
-
-    for (const p of this.sim.players.values()) {
-      if (p.alive) {
-        this.renderPlayer(ctx, p);
-      }
-    }
-
+    // Layer 3: All player projectiles, beams, and player hit particles
     for (const p of this.sim.players.values()) {
       const runner = this.sim.abilityRunners.get(p.id);
       if (!runner) continue;
-      this.abilityRenderer.renderForegroundLayer(
+      this.abilityRenderer.renderPlayerProjectilesAndBeams(
         runner.getRenderState(),
         ctx,
         p.x,
@@ -1862,15 +1887,52 @@ export class GameEngine {
         this.sprites
       );
     }
+    this.renderParticles(ctx);
+
+    // Layer 4: Regular enemies, companion turrets/totems, players, and orbitals
+    this.renderEnemies(ctx, 'regular');
+    for (const runner of this.sim.abilityRunners.values()) {
+      this.abilityRenderer.renderCompanions(runner.getRenderState(), ctx, toScreen);
+    }
+    for (const p of this.sim.players.values()) {
+      if (p.alive) {
+        this.renderPlayer(ctx, p);
+      }
+    }
+    for (const p of this.sim.players.values()) {
+      const runner = this.sim.abilityRunners.get(p.id);
+      if (!runner) continue;
+      this.abilityRenderer.renderOrbitals(
+        runner.getRenderState(),
+        ctx,
+        p.x,
+        p.y,
+        toScreen,
+        this.sprites
+      );
+    }
+
+    // Layer 5: Bosses, boss warning telegraphs/AoE rings, boss beams, and ALL enemy/boss projectiles
+    this.bossRenderer.renderGroundTelegraphs(
+      ctx,
+      this.sim.enemies,
+      (id) => this.sim.bossAI.getRuntime(id),
+      toScreen
+    );
+    this.renderEnemies(ctx, 'boss');
     this.bossRenderer.renderForegroundEffects(
       ctx,
       this.sim.enemies,
       (id) => this.sim.bossAI.getRuntime(id),
       toScreen
     );
-
     this.renderEnemyProjectiles(ctx);
-    this.renderParticles(ctx);
+
+    // Layer 6: Health bars, floating damage numbers, and HUD overlays
+    this.renderSoloHealthBars(ctx);
+    for (const runner of this.sim.abilityRunners.values()) {
+      this.abilityRenderer.renderCompanionBars(runner.getRenderState(), ctx, toScreen);
+    }
     this.renderFloatingNumbers(ctx);
     this.renderOffscreenIndicators(ctx, width, height);
     if (this.bossAlertTimer > 0) {
@@ -1891,7 +1953,7 @@ export class GameEngine {
   }
 
   // ==========================================================================
-  // ONLINE CO-OP RENDERING PIPELINE (60 FPS INTERPOLATED + READABILITY POLISH)
+  // ONLINE CO-OP RENDERING PIPELINE (EXPLICIT 6-LAYER Z-ORDER)
   // ==========================================================================
 
   private renderCoop(): void {
@@ -1906,7 +1968,7 @@ export class GameEngine {
     ctx.fillStyle = PALETTE.groundBase;
     ctx.fillRect(0, 0, width, height);
 
-    // 1. Tiled pastel ground
+    // Layer 1: Ground / arena floor & XP crystals / pickups
     this.renderGround(ctx, camX, camY, width, height);
 
     if (this.coopState === 'menu' || !this.coopWorld) {
@@ -1964,8 +2026,29 @@ export class GameEngine {
       }
     }
 
-    // 2. Ground AoE effects (teammates dimmed to 50%, self 100%) + crisp Boss telegraphs
-    this.coopVfx.renderGroundLayer(ctx, selfSlotId, toScreen);
+    this.renderCoopPickups(ctx, world);
+
+    // Layer 2: Player ground zones / auras (Healing Mist, pools, novas, trails, strike ground marks)
+    this.coopVfx.renderPlayerGroundZones(ctx, selfSlotId, toScreen);
+
+    // Layer 3: All player projectiles, beams, and player hit particles
+    this.coopVfx.renderPlayerProjectilesAndBeams(
+      ctx,
+      selfSlotId,
+      world.players,
+      toScreen,
+      this.sprites
+    );
+    this.renderParticles(ctx);
+
+    // Layer 4: Regular enemies, companion turrets/totems, players, and orbitals
+    this.renderCoopEnemies(ctx, world, 'regular');
+    this.coopVfx.renderCompanions(ctx, selfSlotId, toScreen);
+    this.renderCoopPlayers(ctx, world);
+    this.coopVfx.renderOrbitals(ctx, selfSlotId, world.players, toScreen, this.sprites);
+
+    // Layer 5: Bosses, boss warning telegraphs/AoE rings/hazards, and ALL enemy/boss projectiles
+    this.coopVfx.renderBossHazards(ctx, toScreen);
     if (this.coopBossShimList.length > 0) {
       this.bossRenderer.renderGroundTelegraphs(
         ctx,
@@ -1974,18 +2057,7 @@ export class GameEngine {
         toScreen
       );
     }
-
-    // 3. Pickups (XP gems, Hearts, Magnets, Boss Chests)
-    this.renderCoopPickups(ctx, world);
-
-    // 4. Enemies & Bosses (with chilled tint, hit flash, elite/taunt indicators)
-    this.renderCoopEnemies(ctx, world);
-
-    // 5. Squad Players (living heroes, Pastel Ghost downed allies + revive ring, upgrading icon)
-    this.renderCoopPlayers(ctx, world);
-
-    // 6. Foreground projectiles/beams/melee (teammates 50%, self 100%) & ignited boss beams
-    this.coopVfx.renderForegroundLayer(ctx, selfSlotId, world.players, toScreen, this.sprites);
+    this.renderCoopEnemies(ctx, world, 'boss');
     if (this.coopBossShimList.length > 0) {
       this.bossRenderer.renderForegroundEffects(
         ctx,
@@ -1994,12 +2066,12 @@ export class GameEngine {
         toScreen
       );
     }
+    this.coopVfx.renderEnemyProjectiles(ctx, toScreen, this.sprites);
 
-    // 7. Pastel particles & floating damage numbers
-    this.renderParticles(ctx);
+    // Layer 6: Health bars, revive rings, floating damage numbers, and HUD overlays
+    this.renderCoopHealthBarsAndReviveRings(ctx, world);
+    this.coopVfx.renderCompanionBars(ctx, selfSlotId, toScreen);
     this.renderFloatingNumbers(ctx);
-
-    // 8. Edge-of-screen directional arrows (living teammates, downed teammates, bosses, chests)
     this.renderCoopOffscreenIndicators(ctx, world, width, height);
 
     if (this.bossAlertTimer > 0) {
@@ -2093,7 +2165,8 @@ export class GameEngine {
 
   private renderCoopEnemies(
     ctx: CanvasRenderingContext2D,
-    world: InterpolatedWorldState
+    world: InterpolatedWorldState,
+    filter: 'regular' | 'boss'
   ): void {
     const pad = 120;
     const enemies = world.enemies;
@@ -2101,6 +2174,10 @@ export class GameEngine {
 
     for (let i = 0; i < enemies.length; i++) {
       const e = enemies[i];
+      const isBoss = isBossWireType(e.type);
+      if (filter === 'regular' && isBoss) continue;
+      if (filter === 'boss' && !isBoss) continue;
+
       const screen = this.worldToScreen(e.x, e.y);
       if (
         screen.x < -pad ||
@@ -2111,7 +2188,6 @@ export class GameEngine {
         continue;
       }
 
-      const isBoss = isBossWireType(e.type);
       const isElite = (e.flags & WireEnemyFlag.ELITE) !== 0;
       const isChilled = (e.flags & WireEnemyFlag.CHILLED) !== 0;
       const isTaunted = (e.flags & WireEnemyFlag.TAUNTED) !== 0;
@@ -2201,8 +2277,138 @@ export class GameEngine {
         ctx.stroke();
         ctx.restore();
       }
+    }
+  }
 
-      // HP Bar
+  private renderCoopPlayers(
+    ctx: CanvasRenderingContext2D,
+    world: InterpolatedWorldState
+  ): void {
+    // Draw teammates first, local player on top so local hero is always crystal clear
+    const sorted = [...world.players].sort((a, b) => (a.isLocal ? 1 : 0) - (b.isLocal ? 1 : 0));
+
+    for (let i = 0; i < sorted.length; i++) {
+      const p = sorted[i];
+      const screen = this.worldToScreen(p.x, p.y);
+      const isDowned = (p.stateFlags & WirePlayerFlag.DOWNED) !== 0;
+      const isInvuln = (p.stateFlags & WirePlayerFlag.INVULN) !== 0;
+      const isDisconnected = (p.stateFlags & WirePlayerFlag.DISCONNECTED) !== 0;
+      const facingLeft = (p.stateFlags & WirePlayerFlag.FACING_LEFT) !== 0;
+
+      if (isDowned) {
+        this.renderDownedGhostBody(ctx, p, screen.x, screen.y, facingLeft);
+        continue;
+      }
+
+      const walkFrame = p.isMoving ? Math.floor(p.walkTime * 7) % 2 : 0;
+      const bobOffset = p.isMoving && walkFrame === 1 ? -2 : 0;
+      const classColor = CLASSES[p.classId].accentColor;
+
+      // Ground shadow
+      ctx.fillStyle = PALETTE.shadow;
+      ctx.beginPath();
+      ctx.ellipse(screen.x, screen.y + 20, 14, 6, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Subtle class-colored ring beneath teammates (and crisp ring under self)
+      ctx.save();
+      ctx.globalAlpha = p.isLocal ? 0.55 : 0.4;
+      ctx.strokeStyle = p.isLocal ? PALETTE.cream : classColor;
+      ctx.lineWidth = p.isLocal ? 2.5 : 2;
+      ctx.beginPath();
+      ctx.ellipse(screen.x, screen.y + 19, 17, 7, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+
+      // Hero sprite (with invulnerability shimmer/flicker or disconnected fade)
+      ctx.save();
+      if (isDisconnected) {
+        ctx.globalAlpha = 0.55;
+      } else if (isInvuln) {
+        ctx.globalAlpha = 0.58 + 0.36 * Math.sin(this.coopVisualTimeSec * 22);
+      }
+      drawPixelSprite(
+        ctx,
+        this.sprites.heroes[p.classId][walkFrame],
+        screen.x,
+        screen.y + bobOffset,
+        PIXEL_SCALE,
+        facingLeft,
+        p.hitFlashTimer > 0
+      );
+      ctx.restore();
+
+      // Clear translucent pastel shield ring while invulnerable (e.g., 2s post-level-up / revive grace)
+      if (isInvuln && !isDisconnected) {
+        this.renderPlayerInvulnShield(ctx, screen.x, screen.y, this.coopVisualTimeSec);
+      }
+    }
+  }
+
+  /**
+   * Layer 4: Renders a downed teammate's ethereal Pastel Ghost sprite & halo.
+   * The revive standing zone, progress ring, and label render on Layer 6 so they
+   * are never obscured by enemies or projectiles.
+   */
+  private renderDownedGhostBody(
+    ctx: CanvasRenderingContext2D,
+    p: InterpolatedPlayer,
+    sx: number,
+    sy: number,
+    facingLeft: boolean
+  ): void {
+    const pulse = 0.5 + 0.5 * Math.sin(this.coopVisualTimeSec * 5.2);
+    const ghostBob = Math.sin(this.coopVisualTimeSec * 3.8) * 4;
+
+    ctx.save();
+    ctx.globalAlpha = 0.35 + pulse * 0.15;
+    ctx.fillStyle = PALETTE.lavenderLight;
+    ctx.beginPath();
+    ctx.arc(sx, sy + ghostBob, 24, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.globalAlpha = 0.62;
+    drawPixelSprite(
+      ctx,
+      this.sprites.heroes[p.classId][0],
+      sx,
+      sy + ghostBob,
+      PIXEL_SCALE,
+      facingLeft,
+      true
+    );
+    ctx.restore();
+  }
+
+  /**
+   * Layer 6: Renders all Co-op health bars (enemies, bosses, players), teammate name tags,
+   * upgrading badges, and downed player revive rings & labels strictly on top of combat.
+   */
+  private renderCoopHealthBarsAndReviveRings(
+    ctx: CanvasRenderingContext2D,
+    world: InterpolatedWorldState
+  ): void {
+    const pad = 120;
+
+    // 1. Enemy & Boss HP bars
+    const enemies = world.enemies;
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      const screen = this.worldToScreen(e.x, e.y);
+      if (
+        screen.x < -pad ||
+        screen.x > this.viewportWidth + pad ||
+        screen.y < -pad ||
+        screen.y > this.viewportHeight + pad
+      ) {
+        continue;
+      }
+
+      const isBoss = isBossWireType(e.type);
+      const radius = isBoss
+        ? BOSSES[e.type as BossId].radius
+        : ENEMIES[e.type as EnemySpriteId].radius;
+
       if (isBoss) {
         const bossDef = BOSSES[e.type as BossId];
         const bw = 78;
@@ -2230,67 +2436,94 @@ export class GameEngine {
         ctx.fillRect(bx, by, Math.round(bw * ratio), bh);
       }
     }
-  }
 
-  private renderCoopPlayers(
-    ctx: CanvasRenderingContext2D,
-    world: InterpolatedWorldState
-  ): void {
-    // Draw teammates first, local player on top so local hero is always crystal clear
+    // 2. Squad Player HP bars, name tags, upgrading badges & downed revive rings
     const sorted = [...world.players].sort((a, b) => (a.isLocal ? 1 : 0) - (b.isLocal ? 1 : 0));
+    const pulse = 0.5 + 0.5 * Math.sin(this.coopVisualTimeSec * 5.2);
 
     for (let i = 0; i < sorted.length; i++) {
       const p = sorted[i];
       const screen = this.worldToScreen(p.x, p.y);
       const isDowned = (p.stateFlags & WirePlayerFlag.DOWNED) !== 0;
       const isUpgrading = (p.stateFlags & WirePlayerFlag.UPGRADING) !== 0;
-      const isInvuln = (p.stateFlags & WirePlayerFlag.INVULN) !== 0;
       const isBeingRevived = (p.stateFlags & WirePlayerFlag.BEING_REVIVED) !== 0;
       const isDisconnected = (p.stateFlags & WirePlayerFlag.DISCONNECTED) !== 0;
-      const facingLeft = (p.stateFlags & WirePlayerFlag.FACING_LEFT) !== 0;
 
       if (isDowned) {
-        this.renderDownedGhostPlayer(ctx, p, screen.x, screen.y, isBeingRevived, facingLeft);
+        const progress = Math.max(0, Math.min(1, p.revivePct / 100));
+        const sx = screen.x;
+        const sy = screen.y;
+
+        ctx.save();
+        // Revive standing zone circle
+        ctx.globalAlpha = isBeingRevived ? 0.24 + pulse * 0.1 : 0.14 + pulse * 0.08;
+        ctx.fillStyle = isBeingRevived ? PALETTE.mint : PALETTE.coral;
+        ctx.beginPath();
+        ctx.arc(sx, sy, REVIVE_CIRCLE_RADIUS, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.globalAlpha = 0.85;
+        ctx.strokeStyle = isBeingRevived ? PALETTE.mintDark : PALETTE.coral;
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([7, 5]);
+        ctx.beginPath();
+        ctx.arc(sx, sy, REVIVE_CIRCLE_RADIUS, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // Circular revive progress ring tightly framing the Pastel Ghost
+        const ringR = 32;
+        ctx.globalAlpha = 0.9;
+        ctx.strokeStyle = 'rgba(58, 50, 69, 0.55)';
+        ctx.lineWidth = 7;
+        ctx.beginPath();
+        ctx.arc(sx, sy, ringR, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.strokeStyle = 'rgba(253, 246, 227, 0.55)';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(sx, sy, ringR, 0, Math.PI * 2);
+        ctx.stroke();
+
+        if (progress > 0.005) {
+          const startA = -Math.PI * 0.5;
+          const endA = startA + Math.PI * 2 * progress;
+          ctx.strokeStyle = PALETTE.outline;
+          ctx.lineWidth = 7.5;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.arc(sx, sy, ringR, startA, endA);
+          ctx.stroke();
+
+          ctx.strokeStyle = PALETTE.mint;
+          ctx.lineWidth = 4.5;
+          ctx.beginPath();
+          ctx.arc(sx, sy, ringR, startA, endA);
+          ctx.stroke();
+        }
+
+        // Label above ghost
+        ctx.globalAlpha = 1;
+        ctx.font = 'bold 10px ui-monospace, monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        const label =
+          progress > 0
+            ? `REVIVING ${p.revivePct}%`
+            : p.isLocal
+            ? 'DOWNED — WAIT FOR REVIVE'
+            : `REVIVE ${p.name}`;
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = PALETTE.outline;
+        ctx.strokeText(label, Math.round(sx), Math.round(sy - 42));
+        ctx.fillStyle = isBeingRevived ? PALETTE.mint : PALETTE.cream;
+        ctx.fillText(label, Math.round(sx), Math.round(sy - 42));
+        ctx.restore();
         continue;
       }
 
-      const walkFrame = p.isMoving ? Math.floor(p.walkTime * 7) % 2 : 0;
-      const bobOffset = p.isMoving && walkFrame === 1 ? -2 : 0;
       const classColor = CLASSES[p.classId].accentColor;
-
-      // Ground shadow
-      ctx.fillStyle = PALETTE.shadow;
-      ctx.beginPath();
-      ctx.ellipse(screen.x, screen.y + 20, 14, 6, 0, 0, Math.PI * 2);
-      ctx.fill();
-
-      // Subtle class-colored ring beneath teammates (and crisp ring under self)
-      ctx.save();
-      ctx.globalAlpha = p.isLocal ? 0.55 : 0.4;
-      ctx.strokeStyle = p.isLocal ? PALETTE.cream : classColor;
-      ctx.lineWidth = p.isLocal ? 2.5 : 2;
-      ctx.beginPath();
-      ctx.ellipse(screen.x, screen.y + 19, 17, 7, 0, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.restore();
-
-      // Hero sprite (with invulnerability blink or disconnected fade)
-      ctx.save();
-      if (isDisconnected) {
-        ctx.globalAlpha = 0.55;
-      } else if (isInvuln) {
-        ctx.globalAlpha = 0.58 + 0.35 * Math.sin(this.coopVisualTimeSec * 22);
-      }
-      drawPixelSprite(
-        ctx,
-        this.sprites.heroes[p.classId][walkFrame],
-        screen.x,
-        screen.y + bobOffset,
-        PIXEL_SCALE,
-        facingLeft,
-        p.hitFlashTimer > 0
-      );
-      ctx.restore();
 
       // Name tag above teammates
       if (!p.isLocal) {
@@ -2326,110 +2559,6 @@ export class GameEngine {
       ctx.fillStyle = hpRatio > 0.35 ? PALETTE.mintDark : PALETTE.coral;
       ctx.fillRect(bx, by, Math.round(barW * hpRatio), barH);
     }
-  }
-
-  /**
-   * Renders a downed teammate (or self) as a floating Pastel Ghost inside a dashed
-   * revive zone with a crisp circular revive progress ring around the ghost.
-   */
-  private renderDownedGhostPlayer(
-    ctx: CanvasRenderingContext2D,
-    p: InterpolatedPlayer,
-    sx: number,
-    sy: number,
-    isBeingRevived: boolean,
-    facingLeft: boolean
-  ): void {
-    const pulse = 0.5 + 0.5 * Math.sin(this.coopVisualTimeSec * 5.2);
-    const ghostBob = Math.sin(this.coopVisualTimeSec * 3.8) * 4;
-    const progress = Math.max(0, Math.min(1, p.revivePct / 100));
-
-    ctx.save();
-
-    // 1. Revive standing zone circle on the ground
-    ctx.globalAlpha = isBeingRevived ? 0.24 + pulse * 0.1 : 0.14 + pulse * 0.08;
-    ctx.fillStyle = isBeingRevived ? PALETTE.mint : PALETTE.coral;
-    ctx.beginPath();
-    ctx.arc(sx, sy, REVIVE_CIRCLE_RADIUS, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.globalAlpha = 0.85;
-    ctx.strokeStyle = isBeingRevived ? PALETTE.mintDark : PALETTE.coral;
-    ctx.lineWidth = 2.5;
-    ctx.setLineDash([7, 5]);
-    ctx.beginPath();
-    ctx.arc(sx, sy, REVIVE_CIRCLE_RADIUS, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // 2. Ethereal Pastel Ghost halo & semi-transparent tinted hero sprite
-    ctx.globalAlpha = 0.35 + pulse * 0.15;
-    ctx.fillStyle = PALETTE.lavenderLight;
-    ctx.beginPath();
-    ctx.arc(sx, sy + ghostBob, 24, 0, Math.PI * 2);
-    ctx.fill();
-
-    ctx.globalAlpha = 0.62;
-    drawPixelSprite(
-      ctx,
-      this.sprites.heroes[p.classId][0],
-      sx,
-      sy + ghostBob,
-      PIXEL_SCALE,
-      facingLeft,
-      true
-    );
-
-    // 3. Circular revive progress ring tightly framing the Pastel Ghost
-    const ringR = 32;
-    ctx.globalAlpha = 0.9;
-    ctx.strokeStyle = 'rgba(58, 50, 69, 0.55)';
-    ctx.lineWidth = 7;
-    ctx.beginPath();
-    ctx.arc(sx, sy, ringR, 0, Math.PI * 2);
-    ctx.stroke();
-
-    ctx.strokeStyle = 'rgba(253, 246, 227, 0.55)';
-    ctx.lineWidth = 4;
-    ctx.beginPath();
-    ctx.arc(sx, sy, ringR, 0, Math.PI * 2);
-    ctx.stroke();
-
-    if (progress > 0.005) {
-      const startA = -Math.PI * 0.5;
-      const endA = startA + Math.PI * 2 * progress;
-      ctx.strokeStyle = PALETTE.outline;
-      ctx.lineWidth = 7.5;
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.arc(sx, sy, ringR, startA, endA);
-      ctx.stroke();
-
-      ctx.strokeStyle = PALETTE.mint;
-      ctx.lineWidth = 4.5;
-      ctx.beginPath();
-      ctx.arc(sx, sy, ringR, startA, endA);
-      ctx.stroke();
-    }
-
-    // 4. Label above ghost
-    ctx.globalAlpha = 1;
-    ctx.font = 'bold 10px ui-monospace, monospace';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    const label =
-      progress > 0
-        ? `REVIVING ${p.revivePct}%`
-        : p.isLocal
-        ? 'DOWNED — WAIT FOR REVIVE'
-        : `REVIVE ${p.name}`;
-    ctx.lineWidth = 3;
-    ctx.strokeStyle = PALETTE.outline;
-    ctx.strokeText(label, Math.round(sx), Math.round(sy - 42));
-    ctx.fillStyle = isBeingRevived ? PALETTE.mint : PALETTE.cream;
-    ctx.fillText(label, Math.round(sx), Math.round(sy - 42));
-
-    ctx.restore();
   }
 
   /**
@@ -2705,7 +2834,10 @@ export class GameEngine {
     }
   }
 
-  private renderEnemies(ctx: CanvasRenderingContext2D): void {
+  private renderEnemies(
+    ctx: CanvasRenderingContext2D,
+    filter: 'regular' | 'boss'
+  ): void {
     const pad = 120;
     const enemies = this.sim.enemies;
     const elapsedRunSec = this.sim.getElapsedRunSec();
@@ -2713,6 +2845,8 @@ export class GameEngine {
     for (let i = 0; i < enemies.length; i++) {
       const e = enemies[i];
       if (!e.alive) continue;
+      if (filter === 'regular' && e.isBoss) continue;
+      if (filter === 'boss' && !e.isBoss) continue;
 
       const screen = this.worldToScreen(e.x, e.y);
       if (
@@ -2840,6 +2974,27 @@ export class GameEngine {
         ctx.stroke();
         ctx.restore();
       }
+    }
+  }
+
+  /**
+   * Layer 6: Renders Solo Offline enemy, boss, and player health bars strictly on top of combat.
+   */
+  private renderSoloHealthBars(ctx: CanvasRenderingContext2D): void {
+    const pad = 120;
+    const enemies = this.sim.enemies;
+    for (let i = 0; i < enemies.length; i++) {
+      const e = enemies[i];
+      if (!e.alive) continue;
+      const screen = this.worldToScreen(e.x, e.y);
+      if (
+        screen.x < -pad ||
+        screen.x > this.viewportWidth + pad ||
+        screen.y < -pad ||
+        screen.y > this.viewportHeight + pad
+      ) {
+        continue;
+      }
 
       if (e.isBoss && e.bossId) {
         const bossDef = BOSSES[e.bossId];
@@ -2868,6 +3023,23 @@ export class GameEngine {
         ctx.fillStyle = PALETTE.coral;
         ctx.fillRect(bx, by, Math.round(bw * ratio), bh);
       }
+    }
+
+    for (const p of this.sim.players.values()) {
+      if (!p.alive) continue;
+      const screen = this.worldToScreen(p.x, p.y);
+      const barW = 40;
+      const barH = 6;
+      const bx = Math.round(screen.x - barW / 2);
+      const by = Math.round(screen.y + 28);
+      const hpRatio = Math.max(0, Math.min(1, p.hp / Math.max(1, p.maxHp)));
+
+      ctx.fillStyle = PALETTE.outline;
+      ctx.fillRect(bx - 1, by - 1, barW + 2, barH + 2);
+      ctx.fillStyle = PALETTE.creamDark;
+      ctx.fillRect(bx, by, barW, barH);
+      ctx.fillStyle = hpRatio > 0.35 ? PALETTE.mintDark : PALETTE.coral;
+      ctx.fillRect(bx, by, Math.round(barW * hpRatio), barH);
     }
   }
 
@@ -3015,6 +3187,7 @@ export class GameEngine {
     const screen = this.worldToScreen(p.x, p.y);
     const walkFrame = p.isMoving ? Math.floor(p.walkTime * 7) % 2 : 0;
     const bobOffset = p.isMoving && walkFrame === 1 ? -2 : 0;
+    const nowSec = this.sim.getElapsedRunSec();
 
     if (p.retributionBuffTimer > 0) {
       ctx.save();
@@ -3032,6 +3205,11 @@ export class GameEngine {
     ctx.ellipse(screen.x, screen.y + 20, 14, 6, 0, 0, Math.PI * 2);
     ctx.fill();
 
+    ctx.save();
+    if (p.invulnTimer > 0) {
+      const flickerFreq = p.invulnTimer < 0.6 ? 34 : 20;
+      ctx.globalAlpha = 0.6 + 0.35 * Math.sin(nowSec * flickerFreq);
+    }
     drawPixelSprite(
       ctx,
       this.sprites.heroes[p.heroId][walkFrame],
@@ -3041,19 +3219,56 @@ export class GameEngine {
       p.facingLeft,
       p.hitFlashTimer > 0
     );
+    ctx.restore();
 
-    const barW = 40;
-    const barH = 6;
-    const bx = Math.round(screen.x - barW / 2);
-    const by = Math.round(screen.y + 28);
-    const hpRatio = Math.max(0, Math.min(1, p.hp / Math.max(1, p.maxHp)));
+    if (p.invulnTimer > 0) {
+      this.renderPlayerInvulnShield(ctx, screen.x, screen.y, nowSec, p.invulnTimer);
+    }
+  }
 
-    ctx.fillStyle = PALETTE.outline;
-    ctx.fillRect(bx - 1, by - 1, barW + 2, barH + 2);
-    ctx.fillStyle = PALETTE.creamDark;
-    ctx.fillRect(bx, by, barW, barH);
-    ctx.fillStyle = hpRatio > 0.35 ? PALETTE.mintDark : PALETTE.coral;
-    ctx.fillRect(bx, by, Math.round(barW * hpRatio), barH);
+  /**
+   * Renders a soft pastel translucent shield ring & rotating shimmer arc around an
+   * invulnerable player (e.g., 2.0s post-level-up or revive grace period).
+   */
+  private renderPlayerInvulnShield(
+    ctx: CanvasRenderingContext2D,
+    sx: number,
+    sy: number,
+    timeSec: number,
+    remainingSec?: number
+  ): void {
+    const expiringSoon = remainingSec !== undefined && remainingSec < 0.6;
+    const pulse = 0.5 + 0.5 * Math.sin(timeSec * (expiringSoon ? 24 : 10));
+    const fade = remainingSec !== undefined ? Math.min(1, remainingSec / 0.25) : 1;
+    const radius = 25 + pulse * 2.5;
+
+    ctx.save();
+    // Soft translucent pastel shield fill
+    ctx.globalAlpha = (0.14 + pulse * 0.1) * fade;
+    ctx.fillStyle = PALETTE.babyBlueLight;
+    ctx.beginPath();
+    ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Crisp outer pastel ring
+    ctx.globalAlpha = (0.68 + pulse * 0.24) * fade;
+    ctx.strokeStyle = PALETTE.cream;
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.arc(sx, sy, radius, 0, Math.PI * 2);
+    ctx.stroke();
+
+    // Rotating shimmer highlight arc
+    const spin = timeSec * 4.2;
+    ctx.globalAlpha = (0.78 + pulse * 0.2) * fade;
+    ctx.strokeStyle = PALETTE.butter;
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([10, 8]);
+    ctx.beginPath();
+    ctx.arc(sx, sy, radius + 3, spin, spin + Math.PI * 2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
   }
 
   private renderParticles(ctx: CanvasRenderingContext2D): void {

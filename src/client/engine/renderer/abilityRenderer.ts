@@ -8,174 +8,19 @@ import { drawPixelSprite, type SpriteAtlas } from '../../art/sprites';
  */
 export class AbilityRenderer {
   // ==========================================================================
-  // RENDERING (GROUND LAYER + FOREGROUND LAYER)
+  // RENDERING (EXPLICIT Z-LAYERS: GROUND ZONES, PROJECTILES, COMPANIONS, BARS)
   // ==========================================================================
 
   /**
-   * Renders ground-level combat telegraphs, craters, nova waves, turrets, and damage trails.
+   * Layer 2: Renders player ground zones, auras, novas, trails, and strike ground marks.
    */
-  public renderGroundLayer(
+  public renderPlayerGroundZones(
     state: AbilityRenderState,
     ctx2d: CanvasRenderingContext2D,
     worldToScreen: (wx: number, wy: number) => { x: number; y: number },
     sprites: SpriteAtlas
   ): void {
-    // 1. Expanding Novas
-    for (let i = 0; i < state.novas.length; i++) {
-      const n = state.novas[i];
-      const pos = worldToScreen(n.x, n.y);
-      const alpha = Math.max(0, 1 - n.age / n.maxLife);
-
-      ctx2d.save();
-      ctx2d.globalAlpha = alpha * 0.34;
-      ctx2d.fillStyle = n.color;
-      ctx2d.beginPath();
-      ctx2d.arc(pos.x, pos.y, n.currentRadius, 0, Math.PI * 2);
-      ctx2d.fill();
-
-      ctx2d.globalAlpha = alpha * 0.92;
-      ctx2d.strokeStyle = n.ringColor;
-      ctx2d.lineWidth = 4;
-      ctx2d.beginPath();
-      ctx2d.arc(pos.x, pos.y, n.currentRadius, 0, Math.PI * 2);
-      ctx2d.stroke();
-
-      ctx2d.strokeStyle = PALETTE.outline;
-      ctx2d.lineWidth = 1.5;
-      ctx2d.beginPath();
-      ctx2d.arc(pos.x, pos.y, n.currentRadius + 2, 0, Math.PI * 2);
-      ctx2d.stroke();
-      ctx2d.restore();
-    }
-
-    // 2. Ground Trails & Afterimages
-    for (let i = 0; i < state.trails.length; i++) {
-      const tr = state.trails[i];
-      const alpha = Math.max(0, 1 - tr.age / tr.maxLife);
-      const s1 = worldToScreen(tr.x, tr.y);
-
-      ctx2d.save();
-      if (tr.kind === 'afterimage' && tr.heroId) {
-        ctx2d.globalAlpha = alpha * 0.55;
-        drawPixelSprite(
-          ctx2d,
-          sprites.heroes[tr.heroId][0],
-          s1.x,
-          s1.y,
-          3,
-          Boolean(tr.facingLeft),
-          true
-        );
-      } else {
-        const s2 = worldToScreen(tr.x2, tr.y2);
-        ctx2d.globalAlpha = alpha * 0.65;
-        ctx2d.strokeStyle = tr.color;
-        ctx2d.lineCap = 'round';
-        ctx2d.lineWidth = tr.radius * 1.4;
-        ctx2d.beginPath();
-        ctx2d.moveTo(s1.x, s1.y);
-        ctx2d.lineTo(s2.x, s2.y);
-        ctx2d.stroke();
-
-        ctx2d.globalAlpha = alpha * 0.9;
-        ctx2d.strokeStyle = PALETTE.white;
-        ctx2d.lineWidth = Math.max(2, tr.radius * 0.45);
-        ctx2d.stroke();
-      }
-      ctx2d.restore();
-    }
-
-    // 3. Strikes & Rain Telegraphs / Ground Craters
-    for (let i = 0; i < state.strikes.length; i++) {
-      const s = state.strikes[i];
-      const pos = worldToScreen(s.x, s.y);
-
-      ctx2d.save();
-      if (!s.impacted) {
-        const progress = Math.min(1, s.elapsed / Math.max(0.01, s.delay));
-        // Soft pastel telegraph ring
-        ctx2d.globalAlpha = 0.25 + progress * 0.25;
-        ctx2d.fillStyle = s.color;
-        ctx2d.beginPath();
-        ctx2d.arc(pos.x, pos.y, s.radius * progress, 0, Math.PI * 2);
-        ctx2d.fill();
-
-        ctx2d.globalAlpha = 0.78;
-        ctx2d.strokeStyle = s.color;
-        ctx2d.lineWidth = 2;
-        ctx2d.setLineDash([5, 4]);
-        ctx2d.beginPath();
-        ctx2d.arc(pos.x, pos.y, s.radius, 0, Math.PI * 2);
-        ctx2d.stroke();
-        ctx2d.setLineDash([]);
-      } else {
-        const lingerAlpha = Math.max(0, 1 - (s.elapsed - s.delay) / Math.max(0.01, s.lingerTime));
-        ctx2d.globalAlpha = lingerAlpha * 0.42;
-        ctx2d.fillStyle = s.color;
-        ctx2d.beginPath();
-        ctx2d.arc(pos.x, pos.y, s.radius, 0, Math.PI * 2);
-        ctx2d.fill();
-
-        ctx2d.globalAlpha = lingerAlpha * 0.9;
-        ctx2d.strokeStyle = PALETTE.outline;
-        ctx2d.lineWidth = 2;
-        ctx2d.beginPath();
-        ctx2d.arc(pos.x, pos.y, s.radius, 0, Math.PI * 2);
-        ctx2d.stroke();
-      }
-      ctx2d.restore();
-    }
-
-    // 4. Deployed Turrets
-    for (let i = 0; i < state.turrets.length; i++) {
-      const t = state.turrets[i];
-      const pos = worldToScreen(t.x, t.y);
-      const lifeRatio = Math.max(0, 1 - t.age / t.maxLife);
-
-      ctx2d.save();
-      // Shadow
-      ctx2d.fillStyle = PALETTE.shadow;
-      ctx2d.beginPath();
-      ctx2d.ellipse(pos.x, pos.y + 11, 13, 5, 0, 0, Math.PI * 2);
-      ctx2d.fill();
-
-      // Base chassis
-      ctx2d.fillStyle = t.isArtillery ? PALETTE.mintDark : PALETTE.sage;
-      ctx2d.strokeStyle = PALETTE.outline;
-      ctx2d.lineWidth = 2;
-      ctx2d.beginPath();
-      ctx2d.arc(pos.x, pos.y, t.isArtillery ? 12 : 10, 0, Math.PI * 2);
-      ctx2d.fill();
-      ctx2d.stroke();
-
-      // Rotating barrel(s)
-      ctx2d.translate(pos.x, pos.y);
-      ctx2d.rotate(t.angle);
-      ctx2d.fillStyle = PALETTE.cream;
-      if (t.isArtillery) {
-        ctx2d.fillRect(2, -6, 15, 4);
-        ctx2d.strokeRect(2, -6, 15, 4);
-        ctx2d.fillRect(2, 2, 15, 4);
-        ctx2d.strokeRect(2, 2, 15, 4);
-      } else {
-        ctx2d.fillRect(2, -3, 14, 6);
-        ctx2d.strokeRect(2, -3, 14, 6);
-      }
-      ctx2d.restore();
-
-      // Tiny lifetime bar under turret
-      const bw = 24;
-      const bx = Math.round(pos.x - bw / 2);
-      const by = Math.round(pos.y + 15);
-      ctx2d.fillStyle = PALETTE.outline;
-      ctx2d.fillRect(bx - 1, by - 1, bw + 2, 5);
-      ctx2d.fillStyle = PALETTE.creamDark;
-      ctx2d.fillRect(bx, by, bw, 3);
-      ctx2d.fillStyle = t.isArtillery ? PALETTE.mint : PALETTE.butter;
-      ctx2d.fillRect(bx, by, Math.round(bw * lifeRatio), 3);
-    }
-
-    // 5. Lingering Alchemist Zones (Healing Mist, Acid Pool, Gravity Vortex, Sanctuary Choir, Caustic Singularity)
+    // 1. Lingering Alchemist Zones (Healing Mist, Acid Pool, Gravity Vortex, Sanctuary Choir, Caustic Singularity)
     for (let i = 0; i < state.zones.length; i++) {
       const z = state.zones[i];
       const pos = worldToScreen(z.x, z.y);
@@ -225,15 +70,13 @@ export class AbilityRenderer {
       ctx2d.restore();
     }
 
-    // 6. Deployed Alchemist Totems (Revive Totem & Aegis Lantern)
+    // 2. Deployed Alchemist Totem Support / Revive Aura Rings
     for (let i = 0; i < state.totems.length; i++) {
       const t = state.totems[i];
       const pos = worldToScreen(t.x, t.y);
-      const lifeRatio = Math.max(0, 1 - t.age / t.maxLife);
       const pulse = 1 + Math.sin(t.age * 4.5) * 0.04;
 
       ctx2d.save();
-      // Support / Revive aura ring
       ctx2d.globalAlpha = 0.14;
       ctx2d.fillStyle = t.isAegisLantern ? PALETTE.butter : PALETTE.mintLight;
       ctx2d.beginPath();
@@ -248,9 +91,168 @@ export class AbilityRenderer {
       ctx2d.arc(pos.x, pos.y, t.radius * pulse, 0, Math.PI * 2);
       ctx2d.stroke();
       ctx2d.setLineDash([]);
+      ctx2d.restore();
+    }
 
+    // 3. Expanding Novas
+    for (let i = 0; i < state.novas.length; i++) {
+      const n = state.novas[i];
+      const pos = worldToScreen(n.x, n.y);
+      const alpha = Math.max(0, 1 - n.age / n.maxLife);
+
+      ctx2d.save();
+      ctx2d.globalAlpha = alpha * 0.34;
+      ctx2d.fillStyle = n.color;
+      ctx2d.beginPath();
+      ctx2d.arc(pos.x, pos.y, n.currentRadius, 0, Math.PI * 2);
+      ctx2d.fill();
+
+      ctx2d.globalAlpha = alpha * 0.92;
+      ctx2d.strokeStyle = n.ringColor;
+      ctx2d.lineWidth = 4;
+      ctx2d.beginPath();
+      ctx2d.arc(pos.x, pos.y, n.currentRadius, 0, Math.PI * 2);
+      ctx2d.stroke();
+
+      ctx2d.strokeStyle = PALETTE.outline;
+      ctx2d.lineWidth = 1.5;
+      ctx2d.beginPath();
+      ctx2d.arc(pos.x, pos.y, n.currentRadius + 2, 0, Math.PI * 2);
+      ctx2d.stroke();
+      ctx2d.restore();
+    }
+
+    // 4. Ground Trails & Afterimages
+    for (let i = 0; i < state.trails.length; i++) {
+      const tr = state.trails[i];
+      const alpha = Math.max(0, 1 - tr.age / tr.maxLife);
+      const s1 = worldToScreen(tr.x, tr.y);
+
+      ctx2d.save();
+      if (tr.kind === 'afterimage' && tr.heroId) {
+        ctx2d.globalAlpha = alpha * 0.55;
+        drawPixelSprite(
+          ctx2d,
+          sprites.heroes[tr.heroId][0],
+          s1.x,
+          s1.y,
+          3,
+          Boolean(tr.facingLeft),
+          true
+        );
+      } else {
+        const s2 = worldToScreen(tr.x2, tr.y2);
+        ctx2d.globalAlpha = alpha * 0.65;
+        ctx2d.strokeStyle = tr.color;
+        ctx2d.lineCap = 'round';
+        ctx2d.lineWidth = tr.radius * 1.4;
+        ctx2d.beginPath();
+        ctx2d.moveTo(s1.x, s1.y);
+        ctx2d.lineTo(s2.x, s2.y);
+        ctx2d.stroke();
+
+        ctx2d.globalAlpha = alpha * 0.9;
+        ctx2d.strokeStyle = PALETTE.white;
+        ctx2d.lineWidth = Math.max(2, tr.radius * 0.45);
+        ctx2d.stroke();
+      }
+      ctx2d.restore();
+    }
+
+    // 5. Strikes & Rain Telegraphs / Ground Craters
+    for (let i = 0; i < state.strikes.length; i++) {
+      const s = state.strikes[i];
+      const pos = worldToScreen(s.x, s.y);
+
+      ctx2d.save();
+      if (!s.impacted) {
+        const progress = Math.min(1, s.elapsed / Math.max(0.01, s.delay));
+        // Soft pastel telegraph ring
+        ctx2d.globalAlpha = 0.25 + progress * 0.25;
+        ctx2d.fillStyle = s.color;
+        ctx2d.beginPath();
+        ctx2d.arc(pos.x, pos.y, s.radius * progress, 0, Math.PI * 2);
+        ctx2d.fill();
+
+        ctx2d.globalAlpha = 0.78;
+        ctx2d.strokeStyle = s.color;
+        ctx2d.lineWidth = 2;
+        ctx2d.setLineDash([5, 4]);
+        ctx2d.beginPath();
+        ctx2d.arc(pos.x, pos.y, s.radius, 0, Math.PI * 2);
+        ctx2d.stroke();
+        ctx2d.setLineDash([]);
+      } else {
+        const lingerAlpha = Math.max(0, 1 - (s.elapsed - s.delay) / Math.max(0.01, s.lingerTime));
+        ctx2d.globalAlpha = lingerAlpha * 0.42;
+        ctx2d.fillStyle = s.color;
+        ctx2d.beginPath();
+        ctx2d.arc(pos.x, pos.y, s.radius, 0, Math.PI * 2);
+        ctx2d.fill();
+
+        ctx2d.globalAlpha = lingerAlpha * 0.9;
+        ctx2d.strokeStyle = PALETTE.outline;
+        ctx2d.lineWidth = 2;
+        ctx2d.beginPath();
+        ctx2d.arc(pos.x, pos.y, s.radius, 0, Math.PI * 2);
+        ctx2d.stroke();
+      }
+      ctx2d.restore();
+    }
+  }
+
+  /**
+   * Layer 4: Renders deployed companion turrets and Alchemist totem lantern bodies.
+   */
+  public renderCompanions(
+    state: AbilityRenderState,
+    ctx2d: CanvasRenderingContext2D,
+    worldToScreen: (wx: number, wy: number) => { x: number; y: number }
+  ): void {
+    // 1. Deployed Turrets
+    for (let i = 0; i < state.turrets.length; i++) {
+      const t = state.turrets[i];
+      const pos = worldToScreen(t.x, t.y);
+
+      ctx2d.save();
       // Shadow
-      ctx2d.globalAlpha = 1;
+      ctx2d.fillStyle = PALETTE.shadow;
+      ctx2d.beginPath();
+      ctx2d.ellipse(pos.x, pos.y + 11, 13, 5, 0, 0, Math.PI * 2);
+      ctx2d.fill();
+
+      // Base chassis
+      ctx2d.fillStyle = t.isArtillery ? PALETTE.mintDark : PALETTE.sage;
+      ctx2d.strokeStyle = PALETTE.outline;
+      ctx2d.lineWidth = 2;
+      ctx2d.beginPath();
+      ctx2d.arc(pos.x, pos.y, t.isArtillery ? 12 : 10, 0, Math.PI * 2);
+      ctx2d.fill();
+      ctx2d.stroke();
+
+      // Rotating barrel(s)
+      ctx2d.translate(pos.x, pos.y);
+      ctx2d.rotate(t.angle);
+      ctx2d.fillStyle = PALETTE.cream;
+      if (t.isArtillery) {
+        ctx2d.fillRect(2, -6, 15, 4);
+        ctx2d.strokeRect(2, -6, 15, 4);
+        ctx2d.fillRect(2, 2, 15, 4);
+        ctx2d.strokeRect(2, 2, 15, 4);
+      } else {
+        ctx2d.fillRect(2, -3, 14, 6);
+        ctx2d.strokeRect(2, -3, 14, 6);
+      }
+      ctx2d.restore();
+    }
+
+    // 2. Deployed Alchemist Totem Lanterns
+    for (let i = 0; i < state.totems.length; i++) {
+      const t = state.totems[i];
+      const pos = worldToScreen(t.x, t.y);
+
+      ctx2d.save();
+      // Shadow
       ctx2d.fillStyle = PALETTE.shadow;
       ctx2d.beginPath();
       ctx2d.ellipse(pos.x, pos.y + 12, 11, 4.5, 0, 0, Math.PI * 2);
@@ -271,8 +273,37 @@ export class AbilityRenderer {
       ctx2d.fillStyle = PALETTE.butterDark;
       ctx2d.fillRect(pos.x - 9, pos.y - 13, 18, 4);
       ctx2d.strokeRect(pos.x - 9, pos.y - 13, 18, 4);
+      ctx2d.restore();
+    }
+  }
 
-      // Lifetime bar
+  /**
+   * Layer 6: Renders lifetime bars under deployed turrets and totems.
+   */
+  public renderCompanionBars(
+    state: AbilityRenderState,
+    ctx2d: CanvasRenderingContext2D,
+    worldToScreen: (wx: number, wy: number) => { x: number; y: number }
+  ): void {
+    for (let i = 0; i < state.turrets.length; i++) {
+      const t = state.turrets[i];
+      const pos = worldToScreen(t.x, t.y);
+      const lifeRatio = Math.max(0, 1 - t.age / t.maxLife);
+      const bw = 24;
+      const bx = Math.round(pos.x - bw / 2);
+      const by = Math.round(pos.y + 15);
+      ctx2d.fillStyle = PALETTE.outline;
+      ctx2d.fillRect(bx - 1, by - 1, bw + 2, 5);
+      ctx2d.fillStyle = PALETTE.creamDark;
+      ctx2d.fillRect(bx, by, bw, 3);
+      ctx2d.fillStyle = t.isArtillery ? PALETTE.mint : PALETTE.butter;
+      ctx2d.fillRect(bx, by, Math.round(bw * lifeRatio), 3);
+    }
+
+    for (let i = 0; i < state.totems.length; i++) {
+      const t = state.totems[i];
+      const pos = worldToScreen(t.x, t.y);
+      const lifeRatio = Math.max(0, 1 - t.age / t.maxLife);
       const bw = 24;
       const bx = Math.round(pos.x - bw / 2);
       const by = Math.round(pos.y + 15);
@@ -282,15 +313,14 @@ export class AbilityRenderer {
       ctx2d.fillRect(bx, by, bw, 3);
       ctx2d.fillStyle = t.isAegisLantern ? PALETTE.butter : PALETTE.mint;
       ctx2d.fillRect(bx, by, Math.round(bw * lifeRatio), 3);
-      ctx2d.restore();
     }
   }
 
   /**
-   * Renders foreground combat visuals: melee arcs, beams, lightning chains,
-   * orbiting weapons, falling meteors/hammers/arrows, and active projectiles.
+   * Layer 3: Renders player projectiles, beams, melee arcs, lightning chains,
+   * and falling meteors/hammers/arrows/spikes.
    */
-  public renderForegroundLayer(
+  public renderPlayerProjectilesAndBeams(
     state: AbilityRenderState,
     ctx2d: CanvasRenderingContext2D,
     playerX: number,
@@ -420,114 +450,7 @@ export class AbilityRenderer {
       ctx2d.restore();
     }
 
-    // 4. Orbiting Weapons (Arcane Orb, Orbiting Blades, Chain Flail, Eclipse Singularity, Whirlwind Tempest)
-    for (let i = 0; i < state.orbiters.length; i++) {
-      const orb = state.orbiters[i];
-      for (let k = 0; k < orb.count; k++) {
-        const a = orb.baseAngle + (k * Math.PI * 2) / orb.count;
-        const ix = playerX + Math.cos(a) * orb.orbitRadius;
-        const iy = playerY + Math.sin(a) * orb.orbitRadius;
-        const pos = worldToScreen(ix, iy);
-
-        ctx2d.save();
-        if (orb.visualKind === 'flail') {
-          // Chain tether links
-          ctx2d.strokeStyle = PALETTE.outline;
-          ctx2d.lineWidth = 3;
-          ctx2d.setLineDash([4, 4]);
-          ctx2d.beginPath();
-          ctx2d.moveTo(pScreen.x, pScreen.y);
-          ctx2d.lineTo(pos.x, pos.y);
-          ctx2d.stroke();
-          ctx2d.setLineDash([]);
-
-          // Spiked pastel flail head
-          ctx2d.fillStyle = PALETTE.slateLight;
-          ctx2d.strokeStyle = PALETTE.outline;
-          ctx2d.lineWidth = 2;
-          ctx2d.beginPath();
-          ctx2d.arc(pos.x, pos.y, orb.itemRadius * 0.72, 0, Math.PI * 2);
-          ctx2d.fill();
-          ctx2d.stroke();
-
-          ctx2d.fillStyle = PALETTE.cream;
-          ctx2d.beginPath();
-          ctx2d.arc(pos.x - 3, pos.y - 3, 3.5, 0, Math.PI * 2);
-          ctx2d.fill();
-        } else if (orb.visualKind === 'blade' || orb.visualKind === 'greatsword') {
-          const isGreat = orb.visualKind === 'greatsword';
-          const len = isGreat ? 32 : 22;
-          const wid = isGreat ? 10 : 7;
-          ctx2d.translate(pos.x, pos.y);
-          ctx2d.rotate(a + Math.PI / 2);
-
-          // Blade body
-          ctx2d.fillStyle = orb.color;
-          ctx2d.strokeStyle = PALETTE.outline;
-          ctx2d.lineWidth = 2;
-          ctx2d.beginPath();
-          ctx2d.moveTo(len * 0.65, 0);
-          ctx2d.lineTo(-len * 0.35, -wid * 0.5);
-          ctx2d.lineTo(-len * 0.55, 0);
-          ctx2d.lineTo(-len * 0.35, wid * 0.5);
-          ctx2d.closePath();
-          ctx2d.fill();
-          ctx2d.stroke();
-
-          // Highlight streak
-          ctx2d.fillStyle = PALETTE.cream;
-          ctx2d.fillRect(-len * 0.2, -1.5, len * 0.65, 3);
-        } else if (orb.visualKind === 'ward') {
-          // Protective Ward pastel barrier diamond
-          ctx2d.fillStyle = 'rgba(252, 244, 210, 0.35)';
-          ctx2d.beginPath();
-          ctx2d.arc(pos.x, pos.y, orb.itemRadius * 1.15, 0, Math.PI * 2);
-          ctx2d.fill();
-
-          ctx2d.fillStyle = PALETTE.butterLight;
-          ctx2d.strokeStyle = PALETTE.outline;
-          ctx2d.lineWidth = 2;
-          ctx2d.beginPath();
-          ctx2d.arc(pos.x, pos.y, orb.itemRadius * 0.72, 0, Math.PI * 2);
-          ctx2d.fill();
-          ctx2d.stroke();
-
-          ctx2d.fillStyle = PALETTE.mint;
-          ctx2d.beginPath();
-          ctx2d.arc(pos.x, pos.y, orb.itemRadius * 0.35, 0, Math.PI * 2);
-          ctx2d.fill();
-        } else {
-          // Arcane Orb or Eclipse Singularity
-          if (orb.visualKind === 'singularity') {
-            ctx2d.fillStyle = 'rgba(157, 136, 196, 0.35)';
-            ctx2d.beginPath();
-            ctx2d.arc(pos.x, pos.y, orb.itemRadius * 1.2, 0, Math.PI * 2);
-            ctx2d.fill();
-          }
-          if (orb.spriteId) {
-            this.drawRotatedSprite(
-              ctx2d,
-              sprites.projectiles[orb.spriteId],
-              pos.x,
-              pos.y,
-              a * 2,
-              orb.visualKind === 'singularity' ? 2.5 : 2.1
-            );
-          } else {
-            ctx2d.fillStyle = orb.color;
-            ctx2d.strokeStyle = PALETTE.outline;
-            ctx2d.lineWidth = 2;
-            ctx2d.beginPath();
-            ctx2d.arc(pos.x, pos.y, orb.itemRadius * 0.7, 0, Math.PI * 2);
-            ctx2d.fill();
-            ctx2d.stroke();
-          }
-        }
-        ctx2d.restore();
-      }
-    }
-
-    // 5. Falling Meteors, Holy Hammers, Arrow Rain & Erupting Earth Spikes
+    // 4. Falling Meteors, Holy Hammers, Arrow Rain & Erupting Earth Spikes
     for (let i = 0; i < state.strikes.length; i++) {
       const s = state.strikes[i];
       const pos = worldToScreen(s.x, s.y);
@@ -673,6 +596,121 @@ export class AbilityRenderer {
       }
 
       ctx2d.restore();
+    }
+  }
+
+  /**
+   * Layer 4: Renders orbiting weapons around the player (Arcane Orb, Orbiting Blades,
+   * Chain Flail, Protective Ward, Eclipse Singularity, Whirlwind Tempest).
+   */
+  public renderOrbitals(
+    state: AbilityRenderState,
+    ctx2d: CanvasRenderingContext2D,
+    playerX: number,
+    playerY: number,
+    worldToScreen: (wx: number, wy: number) => { x: number; y: number },
+    sprites: SpriteAtlas
+  ): void {
+    const pScreen = worldToScreen(playerX, playerY);
+
+    for (let i = 0; i < state.orbiters.length; i++) {
+      const orb = state.orbiters[i];
+      for (let k = 0; k < orb.count; k++) {
+        const a = orb.baseAngle + (k * Math.PI * 2) / orb.count;
+        const ix = playerX + Math.cos(a) * orb.orbitRadius;
+        const iy = playerY + Math.sin(a) * orb.orbitRadius;
+        const pos = worldToScreen(ix, iy);
+
+        ctx2d.save();
+        if (orb.visualKind === 'flail') {
+          ctx2d.strokeStyle = PALETTE.outline;
+          ctx2d.lineWidth = 3;
+          ctx2d.setLineDash([4, 4]);
+          ctx2d.beginPath();
+          ctx2d.moveTo(pScreen.x, pScreen.y);
+          ctx2d.lineTo(pos.x, pos.y);
+          ctx2d.stroke();
+          ctx2d.setLineDash([]);
+
+          ctx2d.fillStyle = PALETTE.slateLight;
+          ctx2d.strokeStyle = PALETTE.outline;
+          ctx2d.lineWidth = 2;
+          ctx2d.beginPath();
+          ctx2d.arc(pos.x, pos.y, orb.itemRadius * 0.72, 0, Math.PI * 2);
+          ctx2d.fill();
+          ctx2d.stroke();
+
+          ctx2d.fillStyle = PALETTE.cream;
+          ctx2d.beginPath();
+          ctx2d.arc(pos.x - 3, pos.y - 3, 3.5, 0, Math.PI * 2);
+          ctx2d.fill();
+        } else if (orb.visualKind === 'blade' || orb.visualKind === 'greatsword') {
+          const isGreat = orb.visualKind === 'greatsword';
+          const len = isGreat ? 32 : 22;
+          const wid = isGreat ? 10 : 7;
+          ctx2d.translate(pos.x, pos.y);
+          ctx2d.rotate(a + Math.PI / 2);
+
+          ctx2d.fillStyle = orb.color;
+          ctx2d.strokeStyle = PALETTE.outline;
+          ctx2d.lineWidth = 2;
+          ctx2d.beginPath();
+          ctx2d.moveTo(len * 0.65, 0);
+          ctx2d.lineTo(-len * 0.35, -wid * 0.5);
+          ctx2d.lineTo(-len * 0.55, 0);
+          ctx2d.lineTo(-len * 0.35, wid * 0.5);
+          ctx2d.closePath();
+          ctx2d.fill();
+          ctx2d.stroke();
+
+          ctx2d.fillStyle = PALETTE.cream;
+          ctx2d.fillRect(-len * 0.2, -1.5, len * 0.65, 3);
+        } else if (orb.visualKind === 'ward') {
+          ctx2d.fillStyle = 'rgba(252, 244, 210, 0.35)';
+          ctx2d.beginPath();
+          ctx2d.arc(pos.x, pos.y, orb.itemRadius * 1.15, 0, Math.PI * 2);
+          ctx2d.fill();
+
+          ctx2d.fillStyle = PALETTE.butterLight;
+          ctx2d.strokeStyle = PALETTE.outline;
+          ctx2d.lineWidth = 2;
+          ctx2d.beginPath();
+          ctx2d.arc(pos.x, pos.y, orb.itemRadius * 0.72, 0, Math.PI * 2);
+          ctx2d.fill();
+          ctx2d.stroke();
+
+          ctx2d.fillStyle = PALETTE.mint;
+          ctx2d.beginPath();
+          ctx2d.arc(pos.x, pos.y, orb.itemRadius * 0.35, 0, Math.PI * 2);
+          ctx2d.fill();
+        } else {
+          if (orb.visualKind === 'singularity') {
+            ctx2d.fillStyle = 'rgba(157, 136, 196, 0.35)';
+            ctx2d.beginPath();
+            ctx2d.arc(pos.x, pos.y, orb.itemRadius * 1.2, 0, Math.PI * 2);
+            ctx2d.fill();
+          }
+          if (orb.spriteId) {
+            this.drawRotatedSprite(
+              ctx2d,
+              sprites.projectiles[orb.spriteId],
+              pos.x,
+              pos.y,
+              a * 2,
+              orb.visualKind === 'singularity' ? 2.5 : 2.1
+            );
+          } else {
+            ctx2d.fillStyle = orb.color;
+            ctx2d.strokeStyle = PALETTE.outline;
+            ctx2d.lineWidth = 2;
+            ctx2d.beginPath();
+            ctx2d.arc(pos.x, pos.y, orb.itemRadius * 0.7, 0, Math.PI * 2);
+            ctx2d.fill();
+            ctx2d.stroke();
+          }
+        }
+        ctx2d.restore();
+      }
     }
   }
 

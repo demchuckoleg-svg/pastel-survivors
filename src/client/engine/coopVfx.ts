@@ -18,11 +18,16 @@ import type {
   InterpolatedEnemy,
   InterpolatedPlayer,
 } from '../netClient';
+import type { TeammateEffectsMode } from './storage';
 
 type WorldToScreenFn = (wx: number, wy: number) => { x: number; y: number };
 
-const TEAMMATE_EFFECT_OPACITY = 0.5;
-const MAX_LOCAL_PROJECTILES = 280;
+const TEAMMATE_EFFECT_OPACITIES: Record<TeammateEffectsMode, number> = {
+  full: 0.95,
+  dimmed: 0.45,
+  off: 0,
+};
+const MAX_LOCAL_PROJECTILES = 420;
 
 interface VisualProjectile {
   netId?: number;
@@ -212,6 +217,15 @@ export class CoopVfxSystem {
   private lastBossPhase: WireBossState['phase'] | null = null;
   private lastBossAttackId: string | null = null;
   private telegraphStartPos = new Map<number, { x: number; y: number }>();
+  private teammateEffectsMode: TeammateEffectsMode = 'full';
+
+  public setTeammateEffectsMode(mode: TeammateEffectsMode): void {
+    this.teammateEffectsMode = mode;
+  }
+
+  public getTeammateEffectsMode(): TeammateEffectsMode {
+    return this.teammateEffectsMode;
+  }
 
   public reset(): void {
     this.projectiles.length = 0;
@@ -657,6 +671,8 @@ export class CoopVfxSystem {
               ? 'greatsword'
               : ev.abilityId === 'eclipse_singularity'
               ? 'singularity'
+              : ev.abilityId === 'protective_ward'
+              ? 'ward'
               : 'orb';
           this.orbits.push({
             ownerSlotId,
@@ -1001,20 +1017,615 @@ export class CoopVfxSystem {
   }
 
   // ==========================================================================
-  // RENDERING (SELF = 100%, TEAMMATES = 50% OPACITY)
+  // RENDERING (EXPLICIT Z-LAYERS + CONFIGURABLE TEAMMATE OPACITY)
   // ==========================================================================
 
   private getOpacityForOwner(ownerSlotId: number, selfSlotId: number): number {
     if (ownerSlotId === 0 || ownerSlotId === selfSlotId) return 1;
-    return TEAMMATE_EFFECT_OPACITY;
+    return TEAMMATE_EFFECT_OPACITIES[this.teammateEffectsMode];
   }
 
-  public renderGroundLayer(
+  /**
+   * Layer 2: Player ground zones / auras (Alchemist pools, totem aura rings,
+   * player novas, ground trails, and player strike ground marks).
+   */
+  public renderPlayerGroundZones(
     ctx: CanvasRenderingContext2D,
     selfSlotId: number,
     toScreen: WorldToScreenFn
   ): void {
-    // 0. Co-op Boss Hazards (shrinking arena ring, meteor circles, laser tether — always 100% opacity)
+    // 1. Alchemist Zones
+    for (let i = 0; i < this.zones.length; i++) {
+      const z = this.zones[i];
+      const op = this.getOpacityForOwner(z.ownerSlotId, selfSlotId);
+      if (op <= 0) continue;
+      const pos = toScreen(z.x, z.y);
+      const fadeIn = Math.min(1, z.age / 0.2);
+      const fadeOut = Math.min(1, (z.maxLife - z.age) / 0.35);
+      const alpha = Math.max(0, Math.min(fadeIn, fadeOut)) * op;
+      const r = z.radius * (1 + Math.sin(z.age * 5 + i) * 0.04);
+
+      ctx.save();
+      ctx.globalAlpha = alpha * 0.26;
+      ctx.fillStyle = z.color;
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (z.isVortex) {
+        ctx.globalAlpha = alpha * 0.65;
+        ctx.strokeStyle = z.ringColor;
+        ctx.lineWidth = 2.5;
+        const spin = z.age * 3.8;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, r * 0.6, spin, spin + Math.PI * 1.2);
+        ctx.stroke();
+      }
+
+      ctx.globalAlpha = alpha * 0.8;
+      ctx.strokeStyle = z.ringColor;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([7, 5]);
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+
+    // 2. Alchemist Totem Support / Revive Ground Auras
+    for (let i = 0; i < this.totems.length; i++) {
+      const t = this.totems[i];
+      const op = this.getOpacityForOwner(t.ownerSlotId, selfSlotId);
+      if (op <= 0) continue;
+      const pos = toScreen(t.x, t.y);
+      ctx.save();
+      ctx.globalAlpha = 0.14 * op;
+      ctx.fillStyle = t.isAegisLantern ? PALETTE.butter : PALETTE.mintLight;
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, t.radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.globalAlpha = 0.72 * op;
+      ctx.strokeStyle = t.isAegisLantern ? PALETTE.butter : PALETTE.mint;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, t.radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+
+    // 3. Player Expanding Novas (boss novas with ownerSlotId === 0 render on Layer 5)
+    for (let i = 0; i < this.novas.length; i++) {
+      const n = this.novas[i];
+      if (n.ownerSlotId === 0) continue;
+      const op = this.getOpacityForOwner(n.ownerSlotId, selfSlotId);
+      if (op <= 0) continue;
+      this.drawNova(ctx, n, op, toScreen);
+    }
+
+    // 4. Ground Trails
+    for (let i = 0; i < this.trails.length; i++) {
+      const tr = this.trails[i];
+      const op = this.getOpacityForOwner(tr.ownerSlotId, selfSlotId);
+      if (op <= 0) continue;
+      const alpha = Math.max(0, 1 - tr.age / tr.maxLife);
+      const s1 = toScreen(tr.x1, tr.y1);
+      const s2 = toScreen(tr.x2, tr.y2);
+
+      ctx.save();
+      ctx.globalAlpha = alpha * 0.65 * op;
+      ctx.strokeStyle = tr.color;
+      ctx.lineCap = 'round';
+      ctx.lineWidth = tr.radius * 1.3;
+      ctx.beginPath();
+      ctx.moveTo(s1.x, s1.y);
+      ctx.lineTo(s2.x, s2.y);
+      ctx.stroke();
+
+      ctx.globalAlpha = alpha * 0.85 * op;
+      ctx.strokeStyle = PALETTE.white;
+      ctx.lineWidth = Math.max(2, tr.radius * 0.4);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 5. Strike Telegraphs & Craters
+    for (let i = 0; i < this.strikes.length; i++) {
+      const s = this.strikes[i];
+      const op = this.getOpacityForOwner(s.ownerSlotId, selfSlotId);
+      if (op <= 0) continue;
+      const pos = toScreen(s.x, s.y);
+
+      ctx.save();
+      if (s.elapsed < s.delay) {
+        const progress = Math.min(1, s.elapsed / Math.max(0.01, s.delay));
+        ctx.globalAlpha = (0.24 + progress * 0.24) * op;
+        ctx.fillStyle = s.color;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, s.radius * progress, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.globalAlpha = 0.78 * op;
+        ctx.strokeStyle = s.color;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 4]);
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, s.radius, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else {
+        const lingerAlpha = Math.max(
+          0,
+          1 - (s.elapsed - s.delay) / Math.max(0.01, s.lingerTime)
+        );
+        ctx.globalAlpha = lingerAlpha * 0.42 * op;
+        ctx.fillStyle = s.color;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, s.radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.globalAlpha = lingerAlpha * 0.85 * op;
+        ctx.strokeStyle = PALETTE.outline;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, s.radius, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+
+  /**
+   * Layer 3: All player projectiles, beams, melee arcs, lightning chains, and falling strikes.
+   * Enemy/boss projectiles (`proj.isEnemyOrb`) are excluded here and drawn on Layer 5.
+   */
+  public renderPlayerProjectilesAndBeams(
+    ctx: CanvasRenderingContext2D,
+    selfSlotId: number,
+    players: readonly InterpolatedPlayer[],
+    toScreen: WorldToScreenFn,
+    sprites: SpriteAtlas
+  ): void {
+    const playerBySlot = new Map<number, InterpolatedPlayer>();
+    for (let i = 0; i < players.length; i++) {
+      playerBySlot.set(players[i].id, players[i]);
+    }
+
+    // 1. Melee Arcs
+    for (let i = 0; i < this.meleeArcs.length; i++) {
+      const arc = this.meleeArcs[i];
+      const op = this.getOpacityForOwner(arc.ownerSlotId, selfSlotId);
+      if (op <= 0) continue;
+      const owner = playerBySlot.get(arc.ownerSlotId);
+      if (!owner) continue;
+      const pScreen = toScreen(owner.x, owner.y);
+      const progress = Math.min(1, arc.age / arc.maxLife);
+      const alpha = Math.max(0, 1 - progress * 0.85);
+      const half = arc.arcSpread * 0.5;
+
+      ctx.save();
+      ctx.translate(pScreen.x, pScreen.y);
+      ctx.globalAlpha = alpha * 0.45 * op;
+      ctx.fillStyle = arc.color;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, arc.radius, arc.angle - half, arc.angle + half);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.globalAlpha = alpha * op;
+      ctx.strokeStyle = PALETTE.cream;
+      ctx.lineWidth = arc.visualKind === 'shield' ? 9 : 6;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.arc(0, 0, arc.radius - 3, arc.angle - half, arc.angle + half);
+      ctx.stroke();
+
+      ctx.strokeStyle = PALETTE.outline;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, arc.radius + 1, arc.angle - half, arc.angle + half);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // 2. Beams
+    for (let i = 0; i < this.beams.length; i++) {
+      const b = this.beams[i];
+      const op = this.getOpacityForOwner(b.ownerSlotId, selfSlotId);
+      if (op <= 0) continue;
+      const alpha = Math.max(0, 1 - (b.age / b.maxLife) * 0.75);
+      const s1 = toScreen(b.x, b.y);
+      const s2 = toScreen(
+        b.x + Math.cos(b.angle) * b.length,
+        b.y + Math.sin(b.angle) * b.length
+      );
+      const pulseW = b.width * (0.82 + 0.22 * Math.sin(b.age * 40));
+
+      ctx.save();
+      ctx.lineCap = 'round';
+      ctx.globalAlpha = alpha * 0.6 * op;
+      ctx.strokeStyle = PALETTE.outline;
+      ctx.lineWidth = pulseW + 4;
+      ctx.beginPath();
+      ctx.moveTo(s1.x, s1.y);
+      ctx.lineTo(s2.x, s2.y);
+      ctx.stroke();
+
+      ctx.globalAlpha = alpha * 0.88 * op;
+      ctx.strokeStyle = b.color;
+      ctx.lineWidth = pulseW;
+      ctx.stroke();
+
+      ctx.globalAlpha = alpha * op;
+      ctx.strokeStyle = b.coreColor;
+      ctx.lineWidth = Math.max(3, pulseW * 0.36);
+      ctx.stroke();
+
+      if (b.spriteId) {
+        const tipFrac = Math.min(1, 0.4 + (b.age / b.maxLife) * 0.6);
+        const tx = s1.x + (s2.x - s1.x) * tipFrac;
+        const ty = s1.y + (s2.y - s1.y) * tipFrac;
+        this.drawRotatedSprite(ctx, sprites.projectiles[b.spriteId], tx, ty, b.angle, 2.3);
+      }
+      ctx.restore();
+    }
+
+    // 3. Chain Lightning Arcs
+    for (let i = 0; i < this.chains.length; i++) {
+      const arc = this.chains[i];
+      const op = this.getOpacityForOwner(arc.ownerSlotId, selfSlotId);
+      if (op <= 0) continue;
+      const alpha = Math.max(0, 1 - arc.age / arc.maxLife);
+
+      ctx.save();
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      ctx.globalAlpha = alpha * op;
+      for (let pIdx = 0; pIdx < arc.points.length - 1; pIdx++) {
+        const a = toScreen(arc.points[pIdx].x, arc.points[pIdx].y);
+        const b = toScreen(arc.points[pIdx + 1].x, arc.points[pIdx + 1].y);
+        const midX = (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 16;
+        const midY = (a.y + b.y) * 0.5 + (Math.random() - 0.5) * 16;
+
+        ctx.strokeStyle = PALETTE.outline;
+        ctx.lineWidth = arc.lineWidth + 3;
+        ctx.beginPath();
+        ctx.moveTo(a.x, a.y);
+        ctx.lineTo(midX, midY);
+        ctx.lineTo(b.x, b.y);
+        ctx.stroke();
+
+        ctx.strokeStyle = arc.color;
+        ctx.lineWidth = arc.lineWidth;
+        ctx.stroke();
+
+        ctx.strokeStyle = PALETTE.white;
+        ctx.lineWidth = 1.4;
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // 4. Falling Meteors / Hammers / Arrows / Erupting Spikes
+    for (let i = 0; i < this.strikes.length; i++) {
+      const s = this.strikes[i];
+      const op = this.getOpacityForOwner(s.ownerSlotId, selfSlotId);
+      if (op <= 0) continue;
+      const pos = toScreen(s.x, s.y);
+
+      ctx.save();
+      ctx.globalAlpha = op;
+      if (s.elapsed < s.delay) {
+        const progress = Math.min(1, s.elapsed / Math.max(0.01, s.delay));
+        if (
+          s.visualKind === 'meteor' ||
+          s.visualKind === 'cataclysm_meteor' ||
+          s.visualKind === 'holy_hammer' ||
+          s.visualKind === 'divine_hammer'
+        ) {
+          const dropHeight = (1 - progress) * 220;
+          const dropOffsetX =
+            s.visualKind === 'meteor' || s.visualKind === 'cataclysm_meteor'
+              ? (1 - progress) * 80
+              : 0;
+          const scale =
+            s.visualKind === 'cataclysm_meteor' || s.visualKind === 'divine_hammer' ? 3.0 : 2.3;
+          if (s.spriteId) {
+            this.drawRotatedSprite(
+              ctx,
+              sprites.projectiles[s.spriteId],
+              pos.x + dropOffsetX,
+              pos.y - dropHeight,
+              s.visualKind.includes('hammer') ? 0 : Math.PI * 0.65,
+              scale
+            );
+          }
+        } else if (s.visualKind === 'arrow_rain') {
+          const dropHeight = (1 - progress) * 165;
+          for (let k = -1; k <= 1; k++) {
+            this.drawRotatedSprite(
+              ctx,
+              sprites.projectiles.arrow,
+              pos.x + k * 14 + (1 - progress) * 24,
+              pos.y - dropHeight + Math.abs(k) * 9,
+              Math.PI * 0.55,
+              1.6
+            );
+          }
+        }
+      } else if (s.visualKind === 'earth_spike' || s.visualKind === 'ground_slam') {
+        const lingerRatio = Math.max(
+          0,
+          1 - (s.elapsed - s.delay) / Math.max(0.01, s.lingerTime)
+        );
+        ctx.globalAlpha = lingerRatio * op;
+        const h = s.radius * 0.82 * Math.min(1, lingerRatio * 2);
+        const w = s.radius * 0.4;
+        ctx.fillStyle = s.color;
+        ctx.strokeStyle = PALETTE.outline;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(pos.x, pos.y - h);
+        ctx.lineTo(pos.x + w, pos.y + 6);
+        ctx.lineTo(pos.x - w, pos.y + 6);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    // 5. Active Player Projectiles (Self 100%, Teammates Full/Dimmed/Off)
+    for (let i = 0; i < this.projectiles.length; i++) {
+      const proj = this.projectiles[i];
+      if (proj.isEnemyOrb) continue;
+      const op = this.getOpacityForOwner(proj.ownerSlotId, selfSlotId);
+      if (op <= 0) continue;
+      const pos = toScreen(proj.x, proj.y);
+      const fade =
+        proj.age > proj.maxLife * 0.8
+          ? (proj.maxLife - proj.age) / (proj.maxLife * 0.2)
+          : 1;
+
+      ctx.save();
+      ctx.globalAlpha = Math.max(0, Math.min(1, fade)) * op;
+
+      if (proj.sourceId === 'firestorm') {
+        ctx.save();
+        ctx.globalAlpha = 0.32 * op;
+        ctx.fillStyle = PALETTE.coral;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, proj.radius * 1.25, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      if (proj.sourceId === 'wind_blade') {
+        ctx.translate(pos.x, pos.y);
+        ctx.rotate(proj.rotation);
+        ctx.strokeStyle = PALETTE.outline;
+        ctx.lineWidth = 6;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.arc(0, 0, proj.radius * 0.78, -1.1, 1.1);
+        ctx.stroke();
+
+        ctx.strokeStyle = PALETTE.mint;
+        ctx.lineWidth = 3.5;
+        ctx.stroke();
+      } else if (proj.spriteId) {
+        this.drawRotatedSprite(
+          ctx,
+          sprites.projectiles[proj.spriteId],
+          pos.x,
+          pos.y,
+          proj.rotation,
+          proj.scale
+        );
+      } else {
+        ctx.fillStyle = proj.color;
+        ctx.strokeStyle = PALETTE.outline;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, proj.radius, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
+
+      ctx.restore();
+    }
+  }
+
+  /**
+   * Layer 4: Companion turrets and Alchemist totem lantern bodies.
+   */
+  public renderCompanions(
+    ctx: CanvasRenderingContext2D,
+    selfSlotId: number,
+    toScreen: WorldToScreenFn
+  ): void {
+    // 1. Turrets
+    for (let i = 0; i < this.turrets.length; i++) {
+      const t = this.turrets[i];
+      const op = this.getOpacityForOwner(t.ownerSlotId, selfSlotId);
+      if (op <= 0) continue;
+      const pos = toScreen(t.x, t.y);
+
+      ctx.save();
+      ctx.globalAlpha = op;
+      ctx.fillStyle = PALETTE.shadow;
+      ctx.beginPath();
+      ctx.ellipse(pos.x, pos.y + 11, 13, 5, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = t.isArtillery ? PALETTE.mintDark : PALETTE.sage;
+      ctx.strokeStyle = PALETTE.outline;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, t.isArtillery ? 12 : 10, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      ctx.translate(pos.x, pos.y);
+      ctx.rotate(t.angle);
+      ctx.fillStyle = PALETTE.cream;
+      if (t.isArtillery) {
+        ctx.fillRect(2, -6, 15, 4);
+        ctx.strokeRect(2, -6, 15, 4);
+        ctx.fillRect(2, 2, 15, 4);
+        ctx.strokeRect(2, 2, 15, 4);
+      } else {
+        ctx.fillRect(2, -3, 14, 6);
+        ctx.strokeRect(2, -3, 14, 6);
+      }
+      ctx.restore();
+    }
+
+    // 2. Alchemist Totem Lanterns
+    for (let i = 0; i < this.totems.length; i++) {
+      const t = this.totems[i];
+      const op = this.getOpacityForOwner(t.ownerSlotId, selfSlotId);
+      if (op <= 0) continue;
+      const pos = toScreen(t.x, t.y);
+      ctx.save();
+      ctx.globalAlpha = op;
+      ctx.fillStyle = PALETTE.shadow;
+      ctx.beginPath();
+      ctx.ellipse(pos.x, pos.y + 12, 11, 4.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.fillStyle = t.isAegisLantern ? PALETTE.butter : PALETTE.mint;
+      ctx.strokeStyle = PALETTE.outline;
+      ctx.lineWidth = 2;
+      ctx.fillRect(pos.x - 7, pos.y - 10, 14, 18);
+      ctx.strokeRect(pos.x - 7, pos.y - 10, 14, 18);
+      ctx.fillStyle = PALETTE.white;
+      ctx.fillRect(pos.x - 3, pos.y - 6, 6, 10);
+      ctx.restore();
+    }
+  }
+
+  /**
+   * Layer 4: Player orbiting weapons (Arcane Orb, Orbiting Blades, Chain Flail,
+   * Protective Ward, Eclipse Singularity, Whirlwind Tempest).
+   */
+  public renderOrbitals(
+    ctx: CanvasRenderingContext2D,
+    selfSlotId: number,
+    players: readonly InterpolatedPlayer[],
+    toScreen: WorldToScreenFn,
+    sprites: SpriteAtlas
+  ): void {
+    const playerBySlot = new Map<number, InterpolatedPlayer>();
+    for (let i = 0; i < players.length; i++) {
+      playerBySlot.set(players[i].id, players[i]);
+    }
+
+    for (let i = 0; i < this.orbits.length; i++) {
+      const orb = this.orbits[i];
+      const op = this.getOpacityForOwner(orb.ownerSlotId, selfSlotId);
+      if (op <= 0) continue;
+      const owner = playerBySlot.get(orb.ownerSlotId);
+      if (!owner) continue;
+      const pScreen = toScreen(owner.x, owner.y);
+
+      for (let k = 0; k < orb.count; k++) {
+        const a = orb.baseAngle + (k * Math.PI * 2) / orb.count;
+        const ix = owner.x + Math.cos(a) * orb.orbitRadius;
+        const iy = owner.y + Math.sin(a) * orb.orbitRadius;
+        const pos = toScreen(ix, iy);
+
+        ctx.save();
+        ctx.globalAlpha = op;
+        if (orb.visualKind === 'flail') {
+          ctx.strokeStyle = PALETTE.outline;
+          ctx.lineWidth = 2.5;
+          ctx.setLineDash([4, 4]);
+          ctx.beginPath();
+          ctx.moveTo(pScreen.x, pScreen.y);
+          ctx.lineTo(pos.x, pos.y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+
+          ctx.fillStyle = PALETTE.slateLight;
+          ctx.strokeStyle = PALETTE.outline;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(pos.x, pos.y, orb.itemRadius * 0.72, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        } else if (orb.visualKind === 'blade' || orb.visualKind === 'greatsword') {
+          const isGreat = orb.visualKind === 'greatsword';
+          const len = isGreat ? 30 : 21;
+          const wid = isGreat ? 9 : 7;
+          ctx.translate(pos.x, pos.y);
+          ctx.rotate(a + Math.PI / 2);
+          ctx.fillStyle = orb.color;
+          ctx.strokeStyle = PALETTE.outline;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(len * 0.65, 0);
+          ctx.lineTo(-len * 0.35, -wid * 0.5);
+          ctx.lineTo(-len * 0.55, 0);
+          ctx.lineTo(-len * 0.35, wid * 0.5);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        } else if (orb.visualKind === 'ward') {
+          ctx.fillStyle = 'rgba(252, 244, 210, 0.35)';
+          ctx.beginPath();
+          ctx.arc(pos.x, pos.y, orb.itemRadius * 1.15, 0, Math.PI * 2);
+          ctx.fill();
+
+          ctx.fillStyle = PALETTE.butterLight;
+          ctx.strokeStyle = PALETTE.outline;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(pos.x, pos.y, orb.itemRadius * 0.72, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+
+          ctx.fillStyle = PALETTE.mint;
+          ctx.beginPath();
+          ctx.arc(pos.x, pos.y, orb.itemRadius * 0.35, 0, Math.PI * 2);
+          ctx.fill();
+        } else if (orb.spriteId) {
+          this.drawRotatedSprite(
+            ctx,
+            sprites.projectiles[orb.spriteId],
+            pos.x,
+            pos.y,
+            a * 2,
+            orb.visualKind === 'singularity' ? 2.4 : 2.0
+          );
+        } else {
+          ctx.fillStyle = orb.color;
+          ctx.strokeStyle = PALETTE.outline;
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(pos.x, pos.y, orb.itemRadius * 0.7, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
+    }
+  }
+
+  /**
+   * Layer 5: Boss warning hazards (shrinking arena ring, meteor circles, laser tether),
+   * boss novas, and ALL enemy/boss projectiles — always rendered at 100% opacity strictly
+   * above all player projectiles, beams, and particles.
+   */
+  public renderBossHazards(
+    ctx: CanvasRenderingContext2D,
+    toScreen: WorldToScreenFn
+  ): void {
+    // 1. Co-op Boss Hazards (always 100% opacity)
     for (let i = 0; i < this.bossHazards.length; i++) {
       const h = this.bossHazards[i];
       const prog = Math.min(1, h.age / Math.max(0.01, h.maxLife));
@@ -1122,216 +1733,74 @@ export class CoopVfxSystem {
       ctx.restore();
     }
 
-    // 0b. Alchemist Zones (with teammate opacity dimming applied!)
-    for (let i = 0; i < this.zones.length; i++) {
-      const z = this.zones[i];
-      const op = this.getOpacityForOwner(z.ownerSlotId, selfSlotId);
-      const pos = toScreen(z.x, z.y);
-      const fadeIn = Math.min(1, z.age / 0.2);
-      const fadeOut = Math.min(1, (z.maxLife - z.age) / 0.35);
-      const alpha = Math.max(0, Math.min(fadeIn, fadeOut)) * op;
-      const r = z.radius * (1 + Math.sin(z.age * 5 + i) * 0.04);
-
-      ctx.save();
-      ctx.globalAlpha = alpha * 0.26;
-      ctx.fillStyle = z.color;
-      ctx.beginPath();
-      ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
-      ctx.fill();
-
-      if (z.isVortex) {
-        ctx.globalAlpha = alpha * 0.65;
-        ctx.strokeStyle = z.ringColor;
-        ctx.lineWidth = 2.5;
-        const spin = z.age * 3.8;
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y, r * 0.6, spin, spin + Math.PI * 1.2);
-        ctx.stroke();
-      }
-
-      ctx.globalAlpha = alpha * 0.8;
-      ctx.strokeStyle = z.ringColor;
-      ctx.lineWidth = 2;
-      ctx.setLineDash([7, 5]);
-      ctx.beginPath();
-      ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.restore();
-    }
-
-    // 0c. Alchemist Totems (with teammate opacity dimming applied!)
-    for (let i = 0; i < this.totems.length; i++) {
-      const t = this.totems[i];
-      const op = this.getOpacityForOwner(t.ownerSlotId, selfSlotId);
-      const pos = toScreen(t.x, t.y);
-      ctx.save();
-      ctx.globalAlpha = 0.14 * op;
-      ctx.fillStyle = t.isAegisLantern ? PALETTE.butter : PALETTE.mintLight;
-      ctx.beginPath();
-      ctx.arc(pos.x, pos.y, t.radius, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.globalAlpha = 0.72 * op;
-      ctx.strokeStyle = t.isAegisLantern ? PALETTE.butter : PALETTE.mint;
-      ctx.lineWidth = 2;
-      ctx.setLineDash([6, 4]);
-      ctx.beginPath();
-      ctx.arc(pos.x, pos.y, t.radius, 0, Math.PI * 2);
-      ctx.stroke();
-      ctx.setLineDash([]);
-
-      ctx.globalAlpha = op;
-      ctx.fillStyle = t.isAegisLantern ? PALETTE.butter : PALETTE.mint;
-      ctx.strokeStyle = PALETTE.outline;
-      ctx.lineWidth = 2;
-      ctx.fillRect(pos.x - 7, pos.y - 10, 14, 18);
-      ctx.strokeRect(pos.x - 7, pos.y - 10, 14, 18);
-      ctx.fillStyle = PALETTE.white;
-      ctx.fillRect(pos.x - 3, pos.y - 6, 6, 10);
-      ctx.restore();
-    }
-
-    // 1. Expanding Novas
+    // 2. Boss Novas (ownerSlotId === 0, e.g., Aegis Bastion Nova)
     for (let i = 0; i < this.novas.length; i++) {
       const n = this.novas[i];
-      const op = this.getOpacityForOwner(n.ownerSlotId, selfSlotId);
-      const pos = toScreen(n.x, n.y);
-      const prog = Math.min(1, n.age / n.maxLife);
-      const radius = n.maxRadius * (0.2 + 0.8 * (1 - (1 - prog) * (1 - prog)));
-      const alpha = Math.max(0, 1 - prog);
+      if (n.ownerSlotId !== 0) continue;
+      this.drawNova(ctx, n, 1, toScreen);
+    }
+  }
+
+  /**
+   * Layer 5: ALL enemy and boss projectiles — always 100% opacity and strictly above player effects.
+   */
+  public renderEnemyProjectiles(
+    ctx: CanvasRenderingContext2D,
+    toScreen: WorldToScreenFn,
+    sprites: SpriteAtlas
+  ): void {
+    for (let i = 0; i < this.projectiles.length; i++) {
+      const proj = this.projectiles[i];
+      if (!proj.isEnemyOrb) continue;
+      const pos = toScreen(proj.x, proj.y);
+      const fade =
+        proj.age > proj.maxLife * 0.8
+          ? (proj.maxLife - proj.age) / (proj.maxLife * 0.2)
+          : 1;
 
       ctx.save();
-      ctx.globalAlpha = alpha * 0.34 * op;
-      ctx.fillStyle = n.color;
+      ctx.globalAlpha = Math.max(0, Math.min(1, fade));
+
+      ctx.save();
+      ctx.globalAlpha = 0.42 * Math.max(0, Math.min(1, fade));
+      ctx.fillStyle = proj.color;
       ctx.beginPath();
-      ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
+      ctx.arc(pos.x, pos.y, proj.radius + 4, 0, Math.PI * 2);
       ctx.fill();
+      ctx.restore();
 
-      ctx.globalAlpha = alpha * 0.9 * op;
-      ctx.strokeStyle = n.ringColor;
-      ctx.lineWidth = 4;
-      ctx.beginPath();
-      ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
-      ctx.stroke();
-
-      ctx.strokeStyle = PALETTE.outline;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.arc(pos.x, pos.y, radius + 2, 0, Math.PI * 2);
-      ctx.stroke();
+      drawPixelSprite(
+        ctx,
+        sprites.projectiles.enemy_orb,
+        pos.x,
+        pos.y,
+        proj.scale,
+        false,
+        false
+      );
       ctx.restore();
     }
+  }
 
-    // 2. Ground Trails
-    for (let i = 0; i < this.trails.length; i++) {
-      const tr = this.trails[i];
-      const op = this.getOpacityForOwner(tr.ownerSlotId, selfSlotId);
-      const alpha = Math.max(0, 1 - tr.age / tr.maxLife);
-      const s1 = toScreen(tr.x1, tr.y1);
-      const s2 = toScreen(tr.x2, tr.y2);
-
-      ctx.save();
-      ctx.globalAlpha = alpha * 0.65 * op;
-      ctx.strokeStyle = tr.color;
-      ctx.lineCap = 'round';
-      ctx.lineWidth = tr.radius * 1.3;
-      ctx.beginPath();
-      ctx.moveTo(s1.x, s1.y);
-      ctx.lineTo(s2.x, s2.y);
-      ctx.stroke();
-
-      ctx.globalAlpha = alpha * 0.85 * op;
-      ctx.strokeStyle = PALETTE.white;
-      ctx.lineWidth = Math.max(2, tr.radius * 0.4);
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    // 3. Strike Telegraphs & Craters
-    for (let i = 0; i < this.strikes.length; i++) {
-      const s = this.strikes[i];
-      const op = this.getOpacityForOwner(s.ownerSlotId, selfSlotId);
-      const pos = toScreen(s.x, s.y);
-
-      ctx.save();
-      if (s.elapsed < s.delay) {
-        const progress = Math.min(1, s.elapsed / Math.max(0.01, s.delay));
-        ctx.globalAlpha = (0.24 + progress * 0.24) * op;
-        ctx.fillStyle = s.color;
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y, s.radius * progress, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.globalAlpha = 0.78 * op;
-        ctx.strokeStyle = s.color;
-        ctx.lineWidth = 2;
-        ctx.setLineDash([5, 4]);
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y, s.radius, 0, Math.PI * 2);
-        ctx.stroke();
-        ctx.setLineDash([]);
-      } else {
-        const lingerAlpha = Math.max(
-          0,
-          1 - (s.elapsed - s.delay) / Math.max(0.01, s.lingerTime)
-        );
-        ctx.globalAlpha = lingerAlpha * 0.42 * op;
-        ctx.fillStyle = s.color;
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y, s.radius, 0, Math.PI * 2);
-        ctx.fill();
-
-        ctx.globalAlpha = lingerAlpha * 0.85 * op;
-        ctx.strokeStyle = PALETTE.outline;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y, s.radius, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-      ctx.restore();
-    }
-
-    // 4. Turrets
+  /**
+   * Layer 6: Companion turret lifetime bars.
+   */
+  public renderCompanionBars(
+    ctx: CanvasRenderingContext2D,
+    selfSlotId: number,
+    toScreen: WorldToScreenFn
+  ): void {
     for (let i = 0; i < this.turrets.length; i++) {
       const t = this.turrets[i];
       const op = this.getOpacityForOwner(t.ownerSlotId, selfSlotId);
+      if (op <= 0) continue;
       const pos = toScreen(t.x, t.y);
       const lifeRatio = Math.max(0, 1 - t.age / t.maxLife);
-
-      ctx.save();
-      ctx.globalAlpha = op;
-      ctx.fillStyle = PALETTE.shadow;
-      ctx.beginPath();
-      ctx.ellipse(pos.x, pos.y + 11, 13, 5, 0, 0, Math.PI * 2);
-      ctx.fill();
-
-      ctx.fillStyle = t.isArtillery ? PALETTE.mintDark : PALETTE.sage;
-      ctx.strokeStyle = PALETTE.outline;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(pos.x, pos.y, t.isArtillery ? 12 : 10, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-
-      ctx.save();
-      ctx.translate(pos.x, pos.y);
-      ctx.rotate(t.angle);
-      ctx.fillStyle = PALETTE.cream;
-      if (t.isArtillery) {
-        ctx.fillRect(2, -6, 15, 4);
-        ctx.strokeRect(2, -6, 15, 4);
-        ctx.fillRect(2, 2, 15, 4);
-        ctx.strokeRect(2, 2, 15, 4);
-      } else {
-        ctx.fillRect(2, -3, 14, 6);
-        ctx.strokeRect(2, -3, 14, 6);
-      }
-      ctx.restore();
-
       const bw = 24;
       const bx = Math.round(pos.x - bw / 2);
       const by = Math.round(pos.y + 15);
+      ctx.save();
+      ctx.globalAlpha = op;
       ctx.fillStyle = PALETTE.outline;
       ctx.fillRect(bx - 1, by - 1, bw + 2, 5);
       ctx.fillStyle = PALETTE.creamDark;
@@ -1342,345 +1811,45 @@ export class CoopVfxSystem {
     }
   }
 
-  public renderForegroundLayer(
+  private drawNova(
     ctx: CanvasRenderingContext2D,
-    selfSlotId: number,
-    players: readonly InterpolatedPlayer[],
-    toScreen: WorldToScreenFn,
-    sprites: SpriteAtlas
+    n: VisualNova,
+    op: number,
+    toScreen: WorldToScreenFn
   ): void {
-    const playerBySlot = new Map<number, InterpolatedPlayer>();
-    for (let i = 0; i < players.length; i++) {
-      playerBySlot.set(players[i].id, players[i]);
-    }
+    const pos = toScreen(n.x, n.y);
+    const prog = Math.min(1, n.age / n.maxLife);
+    const radius = n.maxRadius * (0.2 + 0.8 * (1 - (1 - prog) * (1 - prog)));
+    const alpha = Math.max(0, 1 - prog);
 
-    // 1. Melee Arcs
-    for (let i = 0; i < this.meleeArcs.length; i++) {
-      const arc = this.meleeArcs[i];
-      const owner = playerBySlot.get(arc.ownerSlotId);
-      if (!owner) continue;
-      const op = this.getOpacityForOwner(arc.ownerSlotId, selfSlotId);
-      const pScreen = toScreen(owner.x, owner.y);
-      const progress = Math.min(1, arc.age / arc.maxLife);
-      const alpha = Math.max(0, 1 - progress * 0.85);
-      const half = arc.arcSpread * 0.5;
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.34 * op;
+    ctx.fillStyle = n.color;
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
+    ctx.fill();
 
-      ctx.save();
-      ctx.translate(pScreen.x, pScreen.y);
-      ctx.globalAlpha = alpha * 0.45 * op;
-      ctx.fillStyle = arc.color;
-      ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.arc(0, 0, arc.radius, arc.angle - half, arc.angle + half);
-      ctx.closePath();
-      ctx.fill();
+    ctx.globalAlpha = alpha * 0.9 * op;
+    ctx.strokeStyle = n.ringColor;
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
+    ctx.stroke();
 
-      ctx.globalAlpha = alpha * op;
-      ctx.strokeStyle = PALETTE.cream;
-      ctx.lineWidth = arc.visualKind === 'shield' ? 9 : 6;
-      ctx.lineCap = 'round';
-      ctx.beginPath();
-      ctx.arc(0, 0, arc.radius - 3, arc.angle - half, arc.angle + half);
-      ctx.stroke();
-
-      ctx.strokeStyle = PALETTE.outline;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.arc(0, 0, arc.radius + 1, arc.angle - half, arc.angle + half);
-      ctx.stroke();
-      ctx.restore();
-    }
-
-    // 2. Beams
-    for (let i = 0; i < this.beams.length; i++) {
-      const b = this.beams[i];
-      const op = this.getOpacityForOwner(b.ownerSlotId, selfSlotId);
-      const alpha = Math.max(0, 1 - (b.age / b.maxLife) * 0.75);
-      const s1 = toScreen(b.x, b.y);
-      const s2 = toScreen(
-        b.x + Math.cos(b.angle) * b.length,
-        b.y + Math.sin(b.angle) * b.length
-      );
-      const pulseW = b.width * (0.82 + 0.22 * Math.sin(b.age * 40));
-
-      ctx.save();
-      ctx.lineCap = 'round';
-      ctx.globalAlpha = alpha * 0.6 * op;
-      ctx.strokeStyle = PALETTE.outline;
-      ctx.lineWidth = pulseW + 4;
-      ctx.beginPath();
-      ctx.moveTo(s1.x, s1.y);
-      ctx.lineTo(s2.x, s2.y);
-      ctx.stroke();
-
-      ctx.globalAlpha = alpha * 0.88 * op;
-      ctx.strokeStyle = b.color;
-      ctx.lineWidth = pulseW;
-      ctx.stroke();
-
-      ctx.globalAlpha = alpha * op;
-      ctx.strokeStyle = b.coreColor;
-      ctx.lineWidth = Math.max(3, pulseW * 0.36);
-      ctx.stroke();
-
-      if (b.spriteId) {
-        const tipFrac = Math.min(1, 0.4 + (b.age / b.maxLife) * 0.6);
-        const tx = s1.x + (s2.x - s1.x) * tipFrac;
-        const ty = s1.y + (s2.y - s1.y) * tipFrac;
-        this.drawRotatedSprite(ctx, sprites.projectiles[b.spriteId], tx, ty, b.angle, 2.3);
-      }
-      ctx.restore();
-    }
-
-    // 3. Chain Lightning Arcs
-    for (let i = 0; i < this.chains.length; i++) {
-      const arc = this.chains[i];
-      const op = this.getOpacityForOwner(arc.ownerSlotId, selfSlotId);
-      const alpha = Math.max(0, 1 - arc.age / arc.maxLife);
-
-      ctx.save();
-      ctx.lineJoin = 'round';
-      ctx.lineCap = 'round';
-      ctx.globalAlpha = alpha * op;
-      for (let pIdx = 0; pIdx < arc.points.length - 1; pIdx++) {
-        const a = toScreen(arc.points[pIdx].x, arc.points[pIdx].y);
-        const b = toScreen(arc.points[pIdx + 1].x, arc.points[pIdx + 1].y);
-        const midX = (a.x + b.x) * 0.5 + (Math.random() - 0.5) * 16;
-        const midY = (a.y + b.y) * 0.5 + (Math.random() - 0.5) * 16;
-
-        ctx.strokeStyle = PALETTE.outline;
-        ctx.lineWidth = arc.lineWidth + 3;
-        ctx.beginPath();
-        ctx.moveTo(a.x, a.y);
-        ctx.lineTo(midX, midY);
-        ctx.lineTo(b.x, b.y);
-        ctx.stroke();
-
-        ctx.strokeStyle = arc.color;
-        ctx.lineWidth = arc.lineWidth;
-        ctx.stroke();
-
-        ctx.strokeStyle = PALETTE.white;
-        ctx.lineWidth = 1.4;
-        ctx.stroke();
-      }
-      ctx.restore();
-    }
-
-    // 4. Orbits
-    for (let i = 0; i < this.orbits.length; i++) {
-      const orb = this.orbits[i];
-      const owner = playerBySlot.get(orb.ownerSlotId);
-      if (!owner) continue;
-      const op = this.getOpacityForOwner(orb.ownerSlotId, selfSlotId);
-      const pScreen = toScreen(owner.x, owner.y);
-
-      for (let k = 0; k < orb.count; k++) {
-        const a = orb.baseAngle + (k * Math.PI * 2) / orb.count;
-        const ix = owner.x + Math.cos(a) * orb.orbitRadius;
-        const iy = owner.y + Math.sin(a) * orb.orbitRadius;
-        const pos = toScreen(ix, iy);
-
-        ctx.save();
-        ctx.globalAlpha = op;
-        if (orb.visualKind === 'flail') {
-          ctx.strokeStyle = PALETTE.outline;
-          ctx.lineWidth = 2.5;
-          ctx.setLineDash([4, 4]);
-          ctx.beginPath();
-          ctx.moveTo(pScreen.x, pScreen.y);
-          ctx.lineTo(pos.x, pos.y);
-          ctx.stroke();
-          ctx.setLineDash([]);
-
-          ctx.fillStyle = PALETTE.slateLight;
-          ctx.strokeStyle = PALETTE.outline;
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.arc(pos.x, pos.y, orb.itemRadius * 0.72, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.stroke();
-        } else if (orb.visualKind === 'blade' || orb.visualKind === 'greatsword') {
-          const isGreat = orb.visualKind === 'greatsword';
-          const len = isGreat ? 30 : 21;
-          const wid = isGreat ? 9 : 7;
-          ctx.translate(pos.x, pos.y);
-          ctx.rotate(a + Math.PI / 2);
-          ctx.fillStyle = orb.color;
-          ctx.strokeStyle = PALETTE.outline;
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.moveTo(len * 0.65, 0);
-          ctx.lineTo(-len * 0.35, -wid * 0.5);
-          ctx.lineTo(-len * 0.55, 0);
-          ctx.lineTo(-len * 0.35, wid * 0.5);
-          ctx.closePath();
-          ctx.fill();
-          ctx.stroke();
-        } else if (orb.spriteId) {
-          this.drawRotatedSprite(
-            ctx,
-            sprites.projectiles[orb.spriteId],
-            pos.x,
-            pos.y,
-            a * 2,
-            orb.visualKind === 'singularity' ? 2.4 : 2.0
-          );
-        } else {
-          ctx.fillStyle = orb.color;
-          ctx.strokeStyle = PALETTE.outline;
-          ctx.lineWidth = 2;
-          ctx.beginPath();
-          ctx.arc(pos.x, pos.y, orb.itemRadius * 0.7, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.stroke();
-        }
-        ctx.restore();
-      }
-    }
-
-    // 5. Falling Meteors / Hammers / Arrows / Erupting Spikes
-    for (let i = 0; i < this.strikes.length; i++) {
-      const s = this.strikes[i];
-      const op = this.getOpacityForOwner(s.ownerSlotId, selfSlotId);
-      const pos = toScreen(s.x, s.y);
-
-      ctx.save();
-      ctx.globalAlpha = op;
-      if (s.elapsed < s.delay) {
-        const progress = Math.min(1, s.elapsed / Math.max(0.01, s.delay));
-        if (
-          s.visualKind === 'meteor' ||
-          s.visualKind === 'cataclysm_meteor' ||
-          s.visualKind === 'holy_hammer' ||
-          s.visualKind === 'divine_hammer'
-        ) {
-          const dropHeight = (1 - progress) * 220;
-          const dropOffsetX =
-            s.visualKind === 'meteor' || s.visualKind === 'cataclysm_meteor'
-              ? (1 - progress) * 80
-              : 0;
-          const scale =
-            s.visualKind === 'cataclysm_meteor' || s.visualKind === 'divine_hammer' ? 3.0 : 2.3;
-          if (s.spriteId) {
-            this.drawRotatedSprite(
-              ctx,
-              sprites.projectiles[s.spriteId],
-              pos.x + dropOffsetX,
-              pos.y - dropHeight,
-              s.visualKind.includes('hammer') ? 0 : Math.PI * 0.65,
-              scale
-            );
-          }
-        } else if (s.visualKind === 'arrow_rain') {
-          const dropHeight = (1 - progress) * 165;
-          for (let k = -1; k <= 1; k++) {
-            this.drawRotatedSprite(
-              ctx,
-              sprites.projectiles.arrow,
-              pos.x + k * 14 + (1 - progress) * 24,
-              pos.y - dropHeight + Math.abs(k) * 9,
-              Math.PI * 0.55,
-              1.6
-            );
-          }
-        }
-      } else if (s.visualKind === 'earth_spike' || s.visualKind === 'ground_slam') {
-        const lingerRatio = Math.max(
-          0,
-          1 - (s.elapsed - s.delay) / Math.max(0.01, s.lingerTime)
-        );
-        ctx.globalAlpha = lingerRatio * op;
-        const h = s.radius * 0.82 * Math.min(1, lingerRatio * 2);
-        const w = s.radius * 0.4;
-        ctx.fillStyle = s.color;
-        ctx.strokeStyle = PALETTE.outline;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.moveTo(pos.x, pos.y - h);
-        ctx.lineTo(pos.x + w, pos.y + 6);
-        ctx.lineTo(pos.x - w, pos.y + 6);
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-      }
-      ctx.restore();
-    }
-
-    // 6. Active Projectiles (Self 100%, Teammates 50%, Boss Orbs 100%)
-    for (let i = 0; i < this.projectiles.length; i++) {
-      const proj = this.projectiles[i];
-      const op = proj.isEnemyOrb
-        ? 1
-        : this.getOpacityForOwner(proj.ownerSlotId, selfSlotId);
-      const pos = toScreen(proj.x, proj.y);
-      const fade = proj.age > proj.maxLife * 0.8 ? (proj.maxLife - proj.age) / (proj.maxLife * 0.2) : 1;
-
-      ctx.save();
-      ctx.globalAlpha = Math.max(0, Math.min(1, fade)) * op;
-
-      if (proj.isEnemyOrb) {
-        ctx.save();
-        ctx.globalAlpha = 0.42 * fade;
-        ctx.fillStyle = proj.color;
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y, proj.radius + 4, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-        drawPixelSprite(ctx, sprites.projectiles.enemy_orb, pos.x, pos.y, proj.scale, false, false);
-        ctx.restore();
-        continue;
-      }
-
-      if (proj.sourceId === 'firestorm') {
-        ctx.save();
-        ctx.globalAlpha = 0.32 * op;
-        ctx.fillStyle = PALETTE.coral;
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y, proj.radius * 1.25, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
-      }
-
-      if (proj.sourceId === 'wind_blade') {
-        ctx.translate(pos.x, pos.y);
-        ctx.rotate(proj.rotation);
-        ctx.strokeStyle = PALETTE.outline;
-        ctx.lineWidth = 6;
-        ctx.lineCap = 'round';
-        ctx.beginPath();
-        ctx.arc(0, 0, proj.radius * 0.78, -1.1, 1.1);
-        ctx.stroke();
-
-        ctx.strokeStyle = PALETTE.mint;
-        ctx.lineWidth = 3.5;
-        ctx.stroke();
-      } else if (proj.spriteId) {
-        this.drawRotatedSprite(
-          ctx,
-          sprites.projectiles[proj.spriteId],
-          pos.x,
-          pos.y,
-          proj.rotation,
-          proj.scale
-        );
-      } else {
-        ctx.fillStyle = proj.color;
-        ctx.strokeStyle = PALETTE.outline;
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.arc(pos.x, pos.y, proj.radius, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
-      }
-
-      ctx.restore();
-    }
+    ctx.strokeStyle = PALETTE.outline;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.arc(pos.x, pos.y, radius + 2, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
   }
 
   private pushProjectile(p: VisualProjectile): void {
     if (this.projectiles.length >= MAX_LOCAL_PROJECTILES) {
-      const evicted = this.projectiles.shift();
+      // Never evict enemy/boss projectiles if any player projectile can be evicted instead
+      const evictIdx = this.projectiles.findIndex((existing) => !existing.isEnemyOrb);
+      const idx = evictIdx >= 0 ? evictIdx : 0;
+      const [evicted] = this.projectiles.splice(idx, 1);
       if (evicted?.netId !== undefined) {
         this.projectilesByNetId.delete(evicted.netId);
       }

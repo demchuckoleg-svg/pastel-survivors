@@ -22,9 +22,12 @@ export interface RunSummaryInput {
   bosses: number;
 }
 
+export type TeammateEffectsMode = 'full' | 'dimmed' | 'off';
+
 export interface GameSettings {
   muted: boolean;
   aimMode: AimMode;
+  teammateEffects: TeammateEffectsMode;
   nickname: string;
   serverUrlOverride: string;
 }
@@ -55,6 +58,7 @@ function createDefaultSaveData(): SaveData {
     settings: {
       muted: false,
       aimMode: 'auto',
+      teammateEffects: 'full',
       nickname: '',
       serverUrlOverride: '',
     },
@@ -135,6 +139,10 @@ export function loadSaveData(): SaveData {
       settings: {
         muted: Boolean(rawSettings.muted),
         aimMode: rawSettings.aimMode === 'mouse' ? 'mouse' : 'auto',
+        teammateEffects:
+          rawSettings.teammateEffects === 'dimmed' || rawSettings.teammateEffects === 'off'
+            ? rawSettings.teammateEffects
+            : 'full',
         nickname:
           typeof rawSettings.nickname === 'string'
             ? rawSettings.nickname.trim().slice(0, 20)
@@ -238,6 +246,17 @@ export function setAimModePreference(aimMode: AimMode): void {
   const data = loadSaveData();
   if (data.settings.aimMode === aimMode) return;
   data.settings.aimMode = aimMode;
+  persistSaveData(data);
+}
+
+export function getTeammateEffectsPreference(): TeammateEffectsMode {
+  return loadSaveData().settings.teammateEffects;
+}
+
+export function setTeammateEffectsPreference(mode: TeammateEffectsMode): void {
+  const data = loadSaveData();
+  if (data.settings.teammateEffects === mode) return;
+  data.settings.teammateEffects = mode;
   persistSaveData(data);
 }
 

@@ -99,6 +99,8 @@ export const DamageNumberFlag = {
   CRIT: 1 << 0,
   SHATTERED: 1 << 1,
   SILENT: 1 << 2,
+  PLAYER_ID_SHIFT: 4,
+  PLAYER_ID_MASK: 0xf0,
 } as const;
 
 export const AbilityFiredFlag = {
@@ -496,6 +498,8 @@ export type BinaryCombatEvent =
   | {
       type: 'DamageNumber';
       enemyId: number;
+      /** Attacking player slot ID (`1..4`), or `0` if unattributed. */
+      playerId?: number;
       x: number;
       y: number;
       amount: number;
@@ -1293,6 +1297,9 @@ export function encodeBinaryEvents(
         if (ev.isCrit) flags |= DamageNumberFlag.CRIT;
         if (ev.shattered) flags |= DamageNumberFlag.SHATTERED;
         if (ev.silent) flags |= DamageNumberFlag.SILENT;
+        if (ev.playerId) {
+          flags |= (clampU8(ev.playerId) & 0x0f) << DamageNumberFlag.PLAYER_ID_SHIFT;
+        }
         view.setUint8(offset, flags);
         offset += 1;
         break;
@@ -1507,9 +1514,11 @@ export function decodeBinaryEvents(input: ArrayBuffer | Uint8Array): BinaryComba
         offset += 2;
         const flags = view.getUint8(offset);
         offset += 1;
+        const playerId = (flags & DamageNumberFlag.PLAYER_ID_MASK) >>> DamageNumberFlag.PLAYER_ID_SHIFT;
         out.push({
           type: 'DamageNumber',
           enemyId,
+          playerId,
           x,
           y,
           amount,

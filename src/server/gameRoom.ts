@@ -972,9 +972,11 @@ export class GameRoom {
         }
 
         case 'DamageDealt': {
+          const slotId = ev.playerId ? this.playerIdToSlot.get(ev.playerId) ?? 0 : 0;
           this.binaryEventsBuf.push({
             type: 'DamageNumber',
             enemyId: ev.enemyId,
+            playerId: slotId,
             x: ev.x,
             y: ev.y,
             amount: Math.max(1, Math.round(ev.amount)),

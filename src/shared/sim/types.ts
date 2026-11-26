@@ -234,6 +234,7 @@ export interface EnemyEntity extends SpatialEntity {
   burnDps: number;
   burnTickTimer: number;
   burnColor: string;
+  burnSourcePlayerId?: PlayerId;
   armorShredTimer: number;
   armorShredBonus: number;
   tauntTimer: number;
