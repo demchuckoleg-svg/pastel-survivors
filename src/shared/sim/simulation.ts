@@ -142,6 +142,7 @@ export class GameSimulation {
 
   // Wave director & run counters
   private nextEnemyId = 1;
+  private nextPickupId = 1;
   private nextChoiceBatchId = 1;
   private spawnAccumulator = 0;
   private overflowSpawnPressure = 0;
@@ -369,6 +370,7 @@ export class GameSimulation {
     for (let i = 0; i < this.pickups.length; i++) {
       const item = this.pickups[i];
       pickups.push({
+        id: item.id,
         kind: item.kind,
         x: item.x,
         y: item.y,
@@ -561,6 +563,7 @@ export class GameSimulation {
     this.tickCount = 0;
     this.elapsedRunSec = 0;
     this.nextEnemyId = 1;
+    this.nextPickupId = 1;
     this.nextChoiceBatchId = 1;
     this.spawnAccumulator = 0;
     this.overflowSpawnPressure = 0;
@@ -1270,7 +1273,10 @@ export class GameSimulation {
     }
 
     const scatter = kind === 'chest' ? 14 : 45;
+    const pickupId = this.nextPickupId;
+    this.nextPickupId = this.nextPickupId >= 65535 ? 1 : this.nextPickupId + 1;
     this.pickups.push({
+      id: pickupId,
       kind,
       x,
       y,
@@ -1760,6 +1766,18 @@ export class GameSimulation {
           p.aimAngle = Math.atan2(dy, dx);
           if (!p.isMoving && Math.abs(dx) > 4) {
             p.facingLeft = dx < 0;
+          }
+        }
+      } else if (
+        p.aimMode === 'mouse' &&
+        input?.aimAngle !== undefined &&
+        Number.isFinite(input.aimAngle)
+      ) {
+        p.aimAngle = input.aimAngle;
+        if (!p.isMoving) {
+          const cos = Math.cos(input.aimAngle);
+          if (Math.abs(cos) > 0.05) {
+            p.facingLeft = cos < 0;
           }
         }
       }

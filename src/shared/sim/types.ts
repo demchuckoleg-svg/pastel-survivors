@@ -71,6 +71,8 @@ export interface PlayerInput {
   aimTargetX?: number;
   aimTargetY?: number;
   hasAimTarget?: boolean;
+  /** Optional explicit aim angle in radians (used by compact binary network INPUT packets). */
+  aimAngle?: number;
 }
 
 export interface GlobalPassiveEntry {
@@ -235,6 +237,7 @@ export interface EnemyEntity extends SpatialEntity {
 }
 
 export interface PickupEntity {
+  id: number;
   kind: PickupSpriteId;
   x: number;
   y: number;
@@ -353,6 +356,7 @@ export interface EnemySnapshot {
 }
 
 export interface PickupSnapshot {
+  id: number;
   kind: PickupSpriteId;
   x: number;
   y: number;

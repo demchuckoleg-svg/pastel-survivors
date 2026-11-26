@@ -5,17 +5,26 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:server": "esbuild src/server/index.ts --bundle --platform=node --target=node22 --format=esm --sourcemap --banner:js=\"import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);\" --outfile=dist-server/index.js && node --enable-source-maps dist-server/index.js",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.shared.json --noEmit && tsc -p tsconfig.server.json --noEmit",
     "typecheck:shared": "tsc -p tsconfig.shared.json --noEmit",
     "typecheck:server": "tsc -p tsconfig.server.json --noEmit",
     "test:server": "esbuild src/server/test-coop.ts --bundle --platform=node --format=esm | node --input-type=module",
-    "test": "npm run test:server",
+    "test:ws": "esbuild src/server/test-ws-integration.ts --bundle --platform=node --target=node22 --format=esm --banner:js=\"import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);\" --outfile=dist-server/test-ws-integration.js && node dist-server/test-ws-integration.js",
+    "test": "npm run test:server && npm run test:ws",
     "build": "vite build",
+    "build:server": "esbuild src/server/index.ts --bundle --platform=node --target=node22 --format=esm --banner:js=\"import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);\" --outfile=dist-server/index.js",
     "preview": "vite preview"
   },
   "devDependencies": {
+    "@types/node": "^26.6.11",
+    "@types/ws": "^8.18.2",
+    "esbuild": "^0.28.2",
     "typescript": "^5.7.3",
     "vite": "^6.0.11",
     "vite-plugin-singlefile": "^2.1.0"
+  },
+  "dependencies": {
+    "ws": "^8.23.0"
   }
 }
