@@ -1,4 +1,4 @@
-import { PALETTE } from '../art/palette';
+import { PALETTE } from './palette';
 import type {
   AbilityDef,
   AbilityId,

@@ -1,14 +1,14 @@
-import { ABILITIES, getAbilitiesForClass, getAbilityDef } from '../data/abilities';
-import { getArtifactDef } from '../data/artifacts';
+import { ABILITIES, getAbilitiesForClass, getAbilityDef } from '@shared/data/abilities';
+import { getArtifactDef } from '@shared/data/artifacts';
 import {
   CLASS_LIST,
   CLASSES,
   MAX_ABILITY_LEVEL,
   MAX_ACTIVE_ABILITY_SLOTS,
-} from '../data/classes';
-import { xpNeeded } from '../data/enemies';
-import { getSynergiesForClass, SYNERGIES } from '../data/synergies';
-import type { AbilityId, ArtifactDef, BossId, HeroId } from '../data/types';
+} from '@shared/data/classes';
+import { xpNeeded } from '@shared/data/enemies';
+import { getSynergiesForClass, SYNERGIES } from '@shared/data/synergies';
+import type { AbilityId, ArtifactDef, BossId, HeroId } from '@shared/data/types';
 import type {
   GameEngine,
   GameState,

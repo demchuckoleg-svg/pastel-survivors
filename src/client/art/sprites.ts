@@ -1,102 +1,29 @@
+import type {
+  AbilityIconId,
+  ArtifactIconId,
+  BossId,
+  EnemySpriteId,
+  GroundSpriteId,
+  HeroId,
+  IconId,
+  PickupSpriteId,
+  ProjectileSpriteId,
+  SynergyIconId,
+} from '@shared/data/types';
 import { PALETTE, PIXEL_CHARS } from './palette';
 
-export type HeroId = 'mage' | 'ranger' | 'knight';
-export type EnemySpriteId = 'slime' | 'golem' | 'wisp' | 'minislime';
-export type BossId = 'king_mochi' | 'lady_wisteria' | 'aegis';
-export type PickupSpriteId = 'xp_small' | 'xp_medium' | 'xp_large' | 'heart' | 'magnet' | 'chest';
-export type ProjectileSpriteId =
-  | 'fireball'
-  | 'ice'
-  | 'lightning'
-  | 'arcane'
-  | 'shadow'
-  | 'bullet'
-  | 'arrow'
-  | 'axe'
-  | 'hammer'
-  | 'spear'
-  | 'enemy_orb';
-export type GroundSpriteId =
-  | 'tile'
-  | 'flower_pink'
-  | 'flower_blue'
-  | 'flower_yellow'
-  | 'clover'
-  | 'pebble'
-  | 'tuft';
-
-export type AbilityIconId =
-  // Mage (10)
-  | 'fireball'
-  | 'wind_blade'
-  | 'ice_shard'
-  | 'frost_nova'
-  | 'chain_lightning'
-  | 'plasma_beam'
-  | 'arcane_orb'
-  | 'shadow_bolt'
-  | 'earth_spike'
-  | 'meteor_rain'
-  // Ranger (10)
-  | 'twin_pistols'
-  | 'homing_arrow'
-  | 'magic_longbow'
-  | 'piercing_rail_bow'
-  | 'shotgun_blast'
-  | 'explosive_crossbow'
-  | 'ricochet_revolver'
-  | 'frost_quiver'
-  | 'gatling_turret'
-  | 'rain_of_arrows'
-  // Knight (10)
-  | 'greatsword_cleave'
-  | 'orbiting_blades'
-  | 'shield_bash'
-  | 'shockwave_stomp'
-  | 'spinning_axe'
-  | 'chain_flail'
-  | 'ground_slam'
-  | 'holy_hammer'
-  | 'spear_thrust'
-  | 'blade_dash';
-
-export type SynergyIconId =
-  // Mage (5)
-  | 'firestorm'
-  | 'absolute_zero'
-  | 'tempest_lance'
-  | 'eclipse_singularity'
-  | 'cataclysm'
-  // Ranger (5)
-  | 'smart_bullets'
-  | 'starlight_railgun'
-  | 'cluster_cannon'
-  | 'glacial_ricochet'
-  | 'artillery_barrage'
-  // Knight (5)
-  | 'whirlwind_tempest'
-  | 'bastion_quake'
-  | 'reapers_pendulum'
-  | 'divine_judgment'
-  | 'valkyrie_blitz';
-
-export type ArtifactIconId =
-  // Mage (3)
-  | 'prismatic_focus'
-  | 'aether_chronometer'
-  | 'mana_conduit'
-  // Ranger (3)
-  | 'quicksilver_quiver'
-  | 'split_fletching_charm'
-  | 'hawkeye_monocle'
-  // Knight (3)
-  | 'valkyrie_crest'
-  | 'titans_gauntlet'
-  | 'retribution_aegis'
-  // Fallback (1)
-  | 'ascended_relic';
-
-export type IconId = AbilityIconId | SynergyIconId | ArtifactIconId;
+export type {
+  AbilityIconId,
+  ArtifactIconId,
+  BossId,
+  EnemySpriteId,
+  GroundSpriteId,
+  HeroId,
+  IconId,
+  PickupSpriteId,
+  ProjectileSpriteId,
+  SynergyIconId,
+};
 
 export interface SpriteAtlas {
   heroes: Record<HeroId, [HTMLCanvasElement, HTMLCanvasElement]>;

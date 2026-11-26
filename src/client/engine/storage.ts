@@ -1,10 +1,11 @@
-import type { HeroId } from '../art/sprites';
+import type { HeroId } from '@shared/data/types';
+import type { AimMode, NewBestFlags } from '@shared/sim/types';
+
+export type { AimMode, NewBestFlags };
 
 /**
  * localStorage persistence for per-class best runs and user preferences.
  */
-
-export type AimMode = 'auto' | 'mouse';
 
 export interface BestRunRecord {
   bestTimeSec: number;
@@ -19,14 +20,6 @@ export interface RunSummaryInput {
   level: number;
   kills: number;
   bosses: number;
-}
-
-export interface NewBestFlags {
-  time: boolean;
-  level: boolean;
-  kills: boolean;
-  bosses: boolean;
-  any: boolean;
 }
 
 export interface GameSettings {
