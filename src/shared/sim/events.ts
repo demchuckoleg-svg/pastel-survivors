@@ -176,6 +176,17 @@ export type SimEvent =
       color: string;
     }
   | {
+      type: 'BossHazard';
+      hazardKind: 'arena_ring' | 'meteor_mark' | 'tether_beam';
+      x: number;
+      y: number;
+      targetX: number;
+      targetY: number;
+      radius: number;
+      durationMs: number;
+      active: boolean;
+    }
+  | {
       type: 'ChestSpawned';
       x: number;
       y: number;

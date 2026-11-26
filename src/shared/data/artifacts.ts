@@ -169,6 +169,65 @@ export const ARTIFACTS: Record<ArtifactId, ArtifactDef> = {
   },
 
   // ==========================================================================
+  // ALCHEMIST ARTIFACTS (3)
+  // ==========================================================================
+  philosophers_censer: {
+    id: 'philosophers_censer',
+    classId: 'alchemist',
+    name: "Philosopher's Censer",
+    iconId: 'philosophers_censer',
+    color: PALETTE.butter,
+    description: '+30% All Area, +30 Max HP, and +25% bonus radius to all healing/support auras.',
+    passive: {
+      id: 'artifact_philosophers_censer',
+      label: '+30% All Area, +30 Max HP (+25% Aura Radius)',
+      modifiers: {
+        areaMult: 0.3,
+        maxHpFlat: 30,
+      },
+    },
+    specialEffect: 'aura_radius_boost',
+  },
+
+  aether_alembic: {
+    id: 'aether_alembic',
+    classId: 'alchemist',
+    name: 'Aether Alembic',
+    iconId: 'aether_alembic',
+    color: PALETTE.mint,
+    description:
+      '+1.5 HP/s Regen and +18% All Area. Excess healing converts into temporary pastel shield HP.',
+    passive: {
+      id: 'artifact_aether_alembic',
+      label: '+1.5 HP/s Regen, +18% Area (Overheal -> Shield)',
+      modifiers: {
+        hpRegen: 1.5,
+        areaMult: 0.18,
+      },
+    },
+    specialEffect: 'overheal_to_shield',
+  },
+
+  chrono_distillate: {
+    id: 'chrono_distillate',
+    classId: 'alchemist',
+    name: 'Chrono Distillate',
+    iconId: 'chrono_distillate',
+    color: PALETTE.coral,
+    description:
+      '-18% All Cooldowns and +10% Move Speed. Passively grants nearby allies -12% Cooldown Haste.',
+    passive: {
+      id: 'artifact_chrono_distillate',
+      label: '-18% All Cooldowns, +10% Move Speed (Shared CD Aura)',
+      modifiers: {
+        cooldownReduction: 0.18,
+        moveSpeedMult: 0.1,
+      },
+    },
+    specialEffect: 'shared_cooldown_aura',
+  },
+
+  // ==========================================================================
   // FALLBACK ARTIFACT (PAST 30:00 / ALL 3 CLASS ARTIFACTS OWNED)
   // ==========================================================================
   ascended_relic: {

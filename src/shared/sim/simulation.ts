@@ -293,7 +293,31 @@ export class GameSimulation {
 
   public getActiveBossInfo(): BossActiveInfo | null {
     const boss = this.getActiveBoss();
-    return boss ? this.bossAI.getBossInfo(boss) : null;
+    if (!boss) return null;
+    const info = this.bossAI.getBossInfo(boss);
+    if (!info) return null;
+
+    // Shared Boss HP bar for The Twin Macarons duo encounter
+    if (boss.bossId === 'twin_macaron_mint' || boss.bossId === 'twin_macaron_rose') {
+      const partner = boss.linkedBossId
+        ? this.enemies.find((e) => e.id === boss.linkedBossId && e.alive)
+        : undefined;
+      if (partner) {
+        return {
+          ...info,
+          name: 'The Twin Macarons',
+          title: 'Mint & Rose Patisserie Duo',
+          hp: Math.max(0, boss.hp) + Math.max(0, partner.hp),
+          maxHp: boss.maxHp + partner.maxHp,
+        };
+      }
+      return {
+        ...info,
+        name: boss.bossId === 'twin_macaron_mint' ? 'Mint Macaron' : 'Rose Macaron',
+      };
+    }
+
+    return info;
   }
 
   public getNextBossCountdownSec(): number {
@@ -464,6 +488,12 @@ export class GameSimulation {
       invulnTimer: 0,
       hitFlashTimer: 0,
       retributionBuffTimer: 0,
+      shieldHp: 0,
+      shieldTimer: 0,
+      hasteBuffTimer: 0,
+      starlightBuffTimer: 0,
+      sharedCdAuraTimer: 0,
+      totemRegenTimer: 0,
       alive: true,
       downed: false,
       reviveProgressSec: 0,
@@ -491,6 +521,9 @@ export class GameSimulation {
         pierceBonus: 0,
         hasDoubleCast: false,
         hasRetributionAegis: false,
+        hasAuraRadiusBoost: false,
+        hasOverhealToShield: false,
+        hasSharedCooldownAura: false,
       },
       masteryCount: 0,
       pendingLevelUps: 0,
@@ -1036,6 +1069,7 @@ export class GameSimulation {
     if (enemy.burnTimer > 0) flags |= EnemyStateFlag.BURNING;
     if (enemy.tauntTimer > 0 && enemy.tauntTargetId !== null) flags |= EnemyStateFlag.TAUNTED;
     if (enemy.isElite) flags |= EnemyStateFlag.ELITE;
+    if (enemy.armorShredTimer > 0) flags |= EnemyStateFlag.ARMOR_SHRED;
     enemy.chilled = enemy.slowTimer > 0;
     enemy.stateFlags = flags;
   }
@@ -1133,6 +1167,8 @@ export class GameSimulation {
       burnDps: 0,
       burnTickTimer: 0,
       burnColor: PALETTE.coral,
+      armorShredTimer: 0,
+      armorShredBonus: 0,
       tauntTimer: 0,
       tauntTargetId: null,
       stateFlags: isElite ? EnemyStateFlag.ELITE : EnemyStateFlag.NONE,
@@ -1196,6 +1232,9 @@ export class GameSimulation {
     const sx = anchor.x + Math.cos(angle) * spawnDist;
     const sy = anchor.y + Math.sin(angle) * spawnDist;
 
+    const isTwinMacarons = bossDef.id === 'twin_macaron_mint';
+    const perBossHp = isTwinMacarons ? Math.round(maxHp * 0.55) : maxHp;
+
     const boss: EnemyEntity = {
       id: this.nextEnemyId++,
       archetypeId: 'golem',
@@ -1210,8 +1249,8 @@ export class GameSimulation {
       kbVx: 0,
       kbVy: 0,
       radius: bossDef.radius,
-      hp: maxHp,
-      maxHp,
+      hp: perBossHp,
+      maxHp: perBossHp,
       speed: bossDef.speed,
       damage: contactDamage,
       xpValue,
@@ -1228,6 +1267,8 @@ export class GameSimulation {
       burnDps: 0,
       burnTickTimer: 0,
       burnColor: bossDef.accentColor,
+      armorShredTimer: 0,
+      armorShredBonus: 0,
       tauntTimer: 0,
       tauntTargetId: null,
       stateFlags: EnemyStateFlag.NONE,
@@ -1241,7 +1282,63 @@ export class GameSimulation {
     this.enemies.push(boss);
     this.bossAI.registerBoss(boss, bossDef.id, encounterIndex);
 
-    const info = this.bossAI.getBossInfo(boss);
+    // Spawn linked Rose Macaron partner symmetrically opposite Mint Macaron
+    if (isTwinMacarons) {
+      const roseDef = BOSSES.twin_macaron_rose;
+      const roseAngle = angle + Math.PI * 0.85;
+      const rx = anchor.x + Math.cos(roseAngle) * spawnDist;
+      const ry = anchor.y + Math.sin(roseAngle) * spawnDist;
+      const roseContactDmg = roseDef.contactDamage * getBossDamageScale(minutes, encounterIndex);
+      const rose: EnemyEntity = {
+        id: this.nextEnemyId++,
+        archetypeId: 'golem',
+        bossId: roseDef.id,
+        linkedBossId: boss.id,
+        isBoss: true,
+        isElite: false,
+        bossEncounterIndex: encounterIndex,
+        x: rx,
+        y: ry,
+        vx: 0,
+        vy: 0,
+        kbVx: 0,
+        kbVy: 0,
+        radius: roseDef.radius,
+        hp: perBossHp,
+        maxHp: perBossHp,
+        speed: roseDef.speed,
+        damage: roseContactDmg,
+        xpValue,
+        knockbackResist: 0.92,
+        facingLeft: rx > anchor.x,
+        walkTime: 0,
+        hitFlashTimer: 0,
+        slowTimer: 0,
+        slowFactor: 1,
+        chilled: false,
+        freezeTimer: 0,
+        stunTimer: 0,
+        burnTimer: 0,
+        burnDps: 0,
+        burnTickTimer: 0,
+        burnColor: roseDef.accentColor,
+        armorShredTimer: 0,
+        armorShredBonus: 0,
+        tauntTimer: 0,
+        tauntTargetId: null,
+        stateFlags: EnemyStateFlag.NONE,
+        rangedCooldown: 0,
+        aiState: 'normal',
+        aiTimer: 0,
+        aiCooldown: 0,
+        alive: true,
+      };
+      boss.linkedBossId = rose.id;
+      this.enemies.push(rose);
+      this.bossAI.registerBoss(rose, roseDef.id, encounterIndex);
+    }
+
+    const info = this.getActiveBossInfo();
     if (info) {
       this.emit({
         type: 'BossSpawned',
@@ -1315,7 +1412,12 @@ export class GameSimulation {
 
     let finalDamage = rawDamage * (isCrit ? critMult : 1);
 
-    // Absolute Zero shatter bonus against frozen or chilled targets
+    // Acid Flask / Caustic Singularity corrosive armor shred amplifies damage from ALL players
+    if (enemy.armorShredTimer > 0 && enemy.armorShredBonus > 0) {
+      finalDamage *= 1 + enemy.armorShredBonus;
+    }
+
+    // Absolute Zero / Plague Glacier shatter bonus against frozen or chilled targets
     let shattered = false;
     if (opts.shatterBonus && (enemy.freezeTimer > 0 || enemy.slowTimer > 0)) {
       finalDamage *= 1.5;
@@ -1342,6 +1444,10 @@ export class GameSimulation {
       enemy.burnTimer = Math.max(enemy.burnTimer, opts.burnDuration);
       enemy.burnDps = Math.max(enemy.burnDps, opts.burnDps);
       enemy.burnColor = opts.burnColor ?? PALETTE.coral;
+    }
+    if (opts.armorShredDuration && opts.armorShredDuration > 0) {
+      enemy.armorShredTimer = Math.max(enemy.armorShredTimer, opts.armorShredDuration);
+      enemy.armorShredBonus = Math.max(enemy.armorShredBonus, opts.armorShredBonus ?? 0.28);
     }
     if (opts.tauntDuration && opts.tauntDuration > 0 && !enemy.isBoss) {
       const taunterId = opts.tauntTargetId ?? attacker.id;
@@ -1433,13 +1539,27 @@ export class GameSimulation {
     return tauntedCount;
   }
 
-  public healPlayer = (amount: number, playerId?: PlayerId): void => {
+  public healPlayer = (
+    amount: number,
+    playerId?: PlayerId,
+    allowOverhealShield = false
+  ): void => {
     if (amount <= 0) return;
     const p = this.resolvePlayer(playerId);
     if (!p.alive || p.downed) return;
     const before = p.hp;
-    p.hp = Math.min(p.maxHp, p.hp + amount);
+    const rawNewHp = p.hp + amount;
+    p.hp = Math.min(p.maxHp, rawNewHp);
     const healed = Math.round(p.hp - before);
+
+    // Aether Alembic: excess healing converts into temporary pastel shield HP (up to 50% Max HP)
+    const overheal = rawNewHp - p.maxHp;
+    if (overheal > 0 && (allowOverhealShield || p.computedStats.hasOverhealToShield)) {
+      const maxShield = Math.round(p.maxHp * 0.5);
+      p.shieldHp = Math.min(maxShield, p.shieldHp + overheal);
+      p.shieldTimer = Math.max(p.shieldTimer, 5.5);
+    }
+
     if (healed > 0) {
       this.emit({
         type: 'PlayerHealed',
@@ -1455,7 +1575,28 @@ export class GameSimulation {
     const p = this.resolvePlayer(playerId);
     if (!p.alive || p.downed || p.invulnTimer > 0 || this.state !== 'playing') return;
 
-    const mitigated = Math.max(1, Math.round(rawDamage * (1 - p.computedStats.armor)));
+    let mitigated = Math.max(1, Math.round(rawDamage * (1 - p.computedStats.armor)));
+
+    // Protective Ward / Aegis Lantern / Aether Alembic pastel shield absorbs damage first
+    if (p.shieldHp > 0) {
+      const absorbed = Math.min(p.shieldHp, mitigated);
+      p.shieldHp = Math.max(0, p.shieldHp - absorbed);
+      mitigated -= absorbed;
+      if (mitigated <= 0) {
+        p.invulnTimer = 0.35;
+        this.emit({
+          type: 'VfxRing',
+          x: p.x,
+          y: p.y,
+          color: PALETTE.butterLight,
+          maxRadius: 34,
+          duration: 0.25,
+        });
+        this.syncPlayerStateFlags(p);
+        return;
+      }
+    }
+
     p.hp = Math.max(0, p.hp - mitigated);
     p.invulnTimer = 0.45;
     p.hitFlashTimer = 0.16;
@@ -1479,6 +1620,8 @@ export class GameSimulation {
 
     if (p.hp <= 0) {
       p.hp = 0;
+      p.shieldHp = 0;
+      p.shieldTimer = 0;
       p.alive = false;
       p.downed = true;
       p.invulnTimer = 0;
@@ -1540,7 +1683,6 @@ export class GameSimulation {
     if (enemy.isBoss) {
       const bossInfo = this.bossAI.getBossInfo(enemy);
       this.bossAI.onBossRemoved(enemy.id);
-      this.bossesDefeated += 1;
 
       const bossAccent = bossInfo?.accentColor ?? PALETTE.butter;
       this.emit({
@@ -1554,6 +1696,34 @@ export class GameSimulation {
         radius: enemy.radius,
         accentColor: bossAccent,
       });
+
+      // Duo Boss (The Twin Macarons): if the partner is still alive, enrage them and wait
+      // until BOTH twins are defeated before dropping the Boss Chest & auto-reviving!
+      const survivingPartner = enemy.linkedBossId
+        ? this.enemies.find((e) => e.id === enemy.linkedBossId && e.alive)
+        : undefined;
+      if (survivingPartner) {
+        this.bossAI.triggerEnrage(survivingPartner.id);
+        this.emit({
+          type: 'VfxText',
+          x: survivingPartner.x,
+          y: survivingPartner.y - survivingPartner.radius - 18,
+          text: 'PARTNER FALLEN! ENRAGED!',
+          color: survivingPartner.burnColor,
+          isCrit: true,
+        });
+        this.emit({
+          type: 'VfxRing',
+          x: survivingPartner.x,
+          y: survivingPartner.y,
+          color: survivingPartner.burnColor,
+          maxRadius: 140,
+          duration: 0.5,
+        });
+        return;
+      }
+
+      this.bossesDefeated += 1;
 
       // Killing any Boss immediately auto-revives all downed players at 50% HP
       for (const p of this.players.values()) {
@@ -1722,10 +1892,52 @@ export class GameSimulation {
       if (p.invulnTimer > 0) p.invulnTimer = Math.max(0, p.invulnTimer - dt);
       if (p.hitFlashTimer > 0) p.hitFlashTimer = Math.max(0, p.hitFlashTimer - dt);
 
+      let needsRecompute = false;
       if (p.retributionBuffTimer > 0) {
         p.retributionBuffTimer = Math.max(0, p.retributionBuffTimer - dt);
-        if (p.retributionBuffTimer === 0) {
-          this.recomputeStats(p, false);
+        if (p.retributionBuffTimer === 0) needsRecompute = true;
+      }
+      if (p.hasteBuffTimer > 0) {
+        p.hasteBuffTimer = Math.max(0, p.hasteBuffTimer - dt);
+        if (p.hasteBuffTimer === 0) needsRecompute = true;
+      }
+      if (p.starlightBuffTimer > 0) {
+        p.starlightBuffTimer = Math.max(0, p.starlightBuffTimer - dt);
+        if (p.starlightBuffTimer === 0) needsRecompute = true;
+      }
+      if (p.sharedCdAuraTimer > 0) {
+        p.sharedCdAuraTimer = Math.max(0, p.sharedCdAuraTimer - dt);
+        if (p.sharedCdAuraTimer === 0) needsRecompute = true;
+      }
+      if (p.totemRegenTimer > 0) {
+        p.totemRegenTimer = Math.max(0, p.totemRegenTimer - dt);
+        if (p.totemRegenTimer === 0) needsRecompute = true;
+      }
+      if (p.shieldTimer > 0) {
+        p.shieldTimer = Math.max(0, p.shieldTimer - dt);
+        if (p.shieldTimer === 0) {
+          p.shieldHp = 0;
+        }
+      }
+      if (needsRecompute) {
+        this.recomputeStats(p, false);
+      }
+
+      // Chrono Distillate artifact: passively grant nearby allies -12% Cooldown Haste
+      if (p.computedStats.hasSharedCooldownAura) {
+        const auraR = 220 * p.computedStats.areaMult * (p.computedStats.hasAuraRadiusBoost ? 1.25 : 1);
+        const auraRSq = auraR * auraR;
+        for (const ally of this.players.values()) {
+          if (ally.id === p.id || !ally.alive || ally.downed) continue;
+          const adx = ally.x - p.x;
+          const ady = ally.y - p.y;
+          if (adx * adx + ady * ady <= auraRSq) {
+            const wasInactive = ally.sharedCdAuraTimer <= 0;
+            ally.sharedCdAuraTimer = Math.max(ally.sharedCdAuraTimer, 0.35);
+            if (wasInactive) {
+              this.recomputeStats(ally, false);
+            }
+          }
         }
       }
 
@@ -1817,11 +2029,28 @@ export class GameSimulation {
         }
       }
 
-      if (reviversInside.length > 0) {
+      // Check if any deployed Revive Totem / Aegis Lantern covers this downed ally
+      let totemBoostMult = 1.0;
+      let totemSoloRate = 0;
+      for (const runner of this.abilityRunners.values()) {
+        const totems = runner.getActiveTotems();
+        for (let ti = 0; ti < totems.length; ti++) {
+          const t = totems[ti];
+          const tdx = t.x - downedPlayer.x;
+          const tdy = t.y - downedPlayer.y;
+          if (tdx * tdx + tdy * tdy <= t.radius * t.radius) {
+            totemBoostMult = Math.max(totemBoostMult, t.reviveBoostMult);
+            totemSoloRate = Math.max(totemSoloRate, t.soloReviveRate);
+          }
+        }
+      }
+
+      if (reviversInside.length > 0 || totemSoloRate > 0) {
         downedPlayer.stateFlags |= PlayerStateFlag.BEING_REVIVED;
+        const speedMult = reviversInside.length > 0 ? totemBoostMult : totemSoloRate;
         downedPlayer.reviveProgressSec = Math.min(
           REVIVE_DURATION_SEC,
-          downedPlayer.reviveProgressSec + dt
+          downedPlayer.reviveProgressSec + dt * speedMult
         );
         downedPlayer.revivePct = Math.min(1, downedPlayer.reviveProgressSec / REVIVE_DURATION_SEC);
 
@@ -1829,7 +2058,7 @@ export class GameSimulation {
           this.revivePlayer(downedPlayer, REVIVE_HP_RATIO, 'circle', reviversInside);
         }
       } else {
-        // Cumulative progress is preserved while no ally is inside
+        // Cumulative progress is preserved while no ally or totem is inside
         downedPlayer.revivePct = Math.min(1, downedPlayer.reviveProgressSec / REVIVE_DURATION_SEC);
       }
     }
@@ -1957,6 +2186,10 @@ export class GameSimulation {
         e.tauntTimer = Math.max(0, e.tauntTimer - dt);
         if (e.tauntTimer === 0) e.tauntTargetId = null;
       }
+      if (e.armorShredTimer > 0) {
+        e.armorShredTimer = Math.max(0, e.armorShredTimer - dt);
+        if (e.armorShredTimer === 0) e.armorShredBonus = 0;
+      }
 
       // Burn / bleed DoT ticks
       if (e.burnTimer > 0) {
@@ -1988,7 +2221,27 @@ export class GameSimulation {
         }
       }
       if (!target) {
-        target = this.findNearestAlivePlayer(e.x, e.y);
+        // Rose Macaron prefers orbiting a different player than Mint Macaron in Co-op
+        if (e.bossId === 'twin_macaron_rose' && alivePlayers.length > 1) {
+          const mint = e.linkedBossId
+            ? this.enemies.find((other) => other.id === e.linkedBossId && other.alive)
+            : undefined;
+          const mintTarget = mint ? this.findNearestAlivePlayer(mint.x, mint.y) : null;
+          let bestAlt: PlayerState | null = null;
+          let bestAltDistSq = Infinity;
+          for (let pi = 0; pi < alivePlayers.length; pi++) {
+            const pl = alivePlayers[pi];
+            if (mintTarget && pl.id === mintTarget.id) continue;
+            const dSq = (pl.x - e.x) ** 2 + (pl.y - e.y) ** 2;
+            if (dSq < bestAltDistSq) {
+              bestAltDistSq = dSq;
+              bestAlt = pl;
+            }
+          }
+          target = bestAlt ?? this.findNearestAlivePlayer(e.x, e.y);
+        } else {
+          target = this.findNearestAlivePlayer(e.x, e.y);
+        }
       }
       if (!target) continue;
 
@@ -2439,7 +2692,96 @@ export class GameSimulation {
         this.damageEnemy(enemy, rawDamage, { ...opts, playerId: player.id }),
       tauntNearbyEnemies: (x, y, radius, durationSec) =>
         this.tauntNearbyEnemies(player.id, x, y, radius, durationSec),
-      healPlayer: (amount) => this.healPlayer(amount, player.id),
+      healPlayer: (amount) =>
+        this.healPlayer(amount, player.id, player.computedStats.hasOverhealToShield),
+      healAlliesInRadius: (x, y, radius, amount, allowOverhealShield = false) => {
+        const rSq = radius * radius;
+        let count = 0;
+        for (const ally of this.players.values()) {
+          if (!ally.alive || ally.downed) continue;
+          const dx = ally.x - x;
+          const dy = ally.y - y;
+          if (dx * dx + dy * dy <= rSq) {
+            this.healPlayer(
+              amount,
+              ally.id,
+              allowOverhealShield || player.computedStats.hasOverhealToShield
+            );
+            count++;
+          }
+        }
+        return count;
+      },
+      grantShieldInRadius: (x, y, radius, shieldAmount, durationSec) => {
+        const rSq = radius * radius;
+        let count = 0;
+        for (const ally of this.players.values()) {
+          if (!ally.alive || ally.downed) continue;
+          const dx = ally.x - x;
+          const dy = ally.y - y;
+          if (dx * dx + dy * dy <= rSq) {
+            const maxShield = Math.round(ally.maxHp * 0.5);
+            ally.shieldHp = Math.min(maxShield, ally.shieldHp + shieldAmount);
+            ally.shieldTimer = Math.max(ally.shieldTimer, durationSec);
+            count++;
+          }
+        }
+        return count;
+      },
+      grantHasteInRadius: (x, y, radius, durationSec) => {
+        const rSq = radius * radius;
+        let count = 0;
+        for (const ally of this.players.values()) {
+          if (!ally.alive || ally.downed) continue;
+          const dx = ally.x - x;
+          const dy = ally.y - y;
+          if (dx * dx + dy * dy <= rSq) {
+            const wasInactive = ally.hasteBuffTimer <= 0;
+            ally.hasteBuffTimer = Math.max(ally.hasteBuffTimer, durationSec);
+            if (wasInactive) {
+              this.recomputeStats(ally, false);
+            }
+            count++;
+          }
+        }
+        return count;
+      },
+      grantStarlightInRadius: (x, y, radius, durationSec) => {
+        const rSq = radius * radius;
+        let count = 0;
+        for (const ally of this.players.values()) {
+          if (!ally.alive || ally.downed) continue;
+          const dx = ally.x - x;
+          const dy = ally.y - y;
+          if (dx * dx + dy * dy <= rSq) {
+            const wasInactive = ally.starlightBuffTimer <= 0;
+            ally.starlightBuffTimer = Math.max(ally.starlightBuffTimer, durationSec);
+            if (wasInactive) {
+              this.recomputeStats(ally, false);
+            }
+            count++;
+          }
+        }
+        return count;
+      },
+      grantTotemRegenInRadius: (x, y, radius, durationSec) => {
+        const rSq = radius * radius;
+        let count = 0;
+        for (const ally of this.players.values()) {
+          if (!ally.alive || ally.downed) continue;
+          const dx = ally.x - x;
+          const dy = ally.y - y;
+          if (dx * dx + dy * dy <= rSq) {
+            const wasInactive = ally.totemRegenTimer <= 0;
+            ally.totemRegenTimer = Math.max(ally.totemRegenTimer, durationSec);
+            if (wasInactive) {
+              this.recomputeStats(ally, false);
+            }
+            count++;
+          }
+        }
+        return count;
+      },
       spawnParticles: (x, y, color, count, opts?: ParticleBurstOptions) =>
         this.emit({ type: 'VfxBurst', x, y, color, count, opts }),
       spawnRingParticle: (x, y, color, maxRadius, duration) =>
@@ -2463,10 +2805,15 @@ export class GameSimulation {
   }
 
   private createBossAIContext(target: PlayerState): BossAIContext {
+    const alivePlayers = this.getAlivePlayers();
     return {
       player: target,
+      allAlivePlayers: alivePlayers,
+      playerCount: this.getPlayerCount(),
       elapsedRunSec: this.elapsedRunSec,
       damagePlayer: (rawDamage) => this.damagePlayer(rawDamage, target.id),
+      damagePlayerById: (playerId, rawDamage) => this.damagePlayer(rawDamage, playerId),
+      getEnemyById: (enemyId) => this.enemies.find((e) => e.id === enemyId),
       spawnEnemyProjectile: (opts) => {
         this.enemyProjectiles.push({
           x: opts.x,
@@ -2506,6 +2853,11 @@ export class GameSimulation {
       onTelegraph: (info) =>
         this.emit({
           type: 'BossTelegraph',
+          ...info,
+        }),
+      onHazard: (info) =>
+        this.emit({
+          type: 'BossHazard',
           ...info,
         }),
     };

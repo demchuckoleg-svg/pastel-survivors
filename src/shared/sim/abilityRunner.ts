@@ -20,7 +20,9 @@ import type {
   ActiveOrbitGroup,
   ActiveProjectile,
   ActiveStrikeOrRain,
+  ActiveTotem,
   ActiveTurret,
+  ActiveZone,
   AimMode,
   ComputedPlayerStats,
   DamageOptions,
@@ -49,6 +51,23 @@ export interface CombatContext {
   damageEnemy: (enemy: EnemyEntity, rawDamage: number, opts?: DamageOptions) => boolean;
   tauntNearbyEnemies?: (x: number, y: number, radius: number, durationSec: number) => number;
   healPlayer: (amount: number) => void;
+  healAlliesInRadius?: (
+    x: number,
+    y: number,
+    radius: number,
+    amount: number,
+    allowOverhealShield?: boolean
+  ) => number;
+  grantShieldInRadius?: (
+    x: number,
+    y: number,
+    radius: number,
+    shieldAmount: number,
+    durationSec: number
+  ) => number;
+  grantHasteInRadius?: (x: number, y: number, radius: number, durationSec: number) => number;
+  grantStarlightInRadius?: (x: number, y: number, radius: number, durationSec: number) => number;
+  grantTotemRegenInRadius?: (x: number, y: number, radius: number, durationSec: number) => number;
   spawnParticles: (
     x: number,
     y: number,
@@ -92,6 +111,8 @@ export class AbilityRunner {
   private chainArcs: ActiveChainArc[] = [];
   private turrets: ActiveTurret[] = [];
   private trails: ActiveGroundTrail[] = [];
+  private zones: ActiveZone[] = [];
+  private totems: ActiveTotem[] = [];
   private delayedCasts: DelayedCast[] = [];
 
   private castCounter = 0;
@@ -107,17 +128,24 @@ export class AbilityRunner {
     this.chainArcs.length = 0;
     this.turrets.length = 0;
     this.trails.length = 0;
+    this.zones.length = 0;
+    this.totems.length = 0;
     this.delayedCasts.length = 0;
     this.castCounter = 0;
   }
 
+  public getActiveTotems(): readonly ActiveTotem[] {
+    return this.totems;
+  }
+
   /**
-   * Removes persistent orbit/turret instances belonging to consumed base abilities
+   * Removes persistent orbit/turret/totem instances belonging to consumed base abilities
    * upon Synergy Evolution so the evolved effect replaces them cleanly.
    */
   public clearEffectsForAbility(abilityId: AbilityId): void {
     this.orbits = this.orbits.filter((o) => o.sourceId !== abilityId);
     this.turrets = this.turrets.filter((t) => t.sourceId !== abilityId);
+    this.totems = this.totems.filter((t) => t.sourceId !== abilityId);
   }
 
   /**
@@ -152,7 +180,7 @@ export class AbilityRunner {
 
   /**
    * Ticks all active ability slots, fires ready abilities/synergies, and updates
-   * all active projectiles, beams, novas, orbits, melee arcs, strikes, turrets, and trails.
+   * all active projectiles, beams, novas, orbits, melee arcs, strikes, turrets, trails, zones, and totems.
    */
   public update(dt: number, slots: ActiveAbilitySlot[], ctx: CombatContext): void {
     // 1. Tick slot cooldowns and execute ready casts
@@ -200,6 +228,8 @@ export class AbilityRunner {
     this.updateChainArcs(dt);
     this.updateTurrets(dt, ctx);
     this.updateTrails(dt, ctx);
+    this.updateZones(dt, ctx);
+    this.updateTotems(dt, ctx);
   }
 
   private castWithChronometer(
@@ -1176,6 +1206,309 @@ export class AbilityRunner {
         return;
       }
 
+      // ----------------------------------------------------------------------
+      // ALCHEMIST (10)
+      // ----------------------------------------------------------------------
+      case 'healing_mist': {
+        const auraBoost = ctx.stats.hasAuraRadiusBoost ? 1.25 : 1;
+        const zoneRadius = area * auraBoost;
+        for (let i = 0; i < count; i++) {
+          const offsetAngle = baseAngle + (i * Math.PI * 2) / Math.max(1, count);
+          const dist = i === 0 ? 18 : 54;
+          const zx = p.x + Math.cos(offsetAngle) * dist;
+          const zy = p.y + Math.sin(offsetAngle) * dist;
+          this.zones.push({
+            sourceId: 'healing_mist',
+            visualKind: 'healing_mist',
+            x: zx,
+            y: zy,
+            radius: zoneRadius,
+            color: PALETTE.mint,
+            ringColor: PALETTE.mintLight,
+            damage,
+            knockback: kb,
+            age: 0,
+            maxLife: stats.duration,
+            tickTimer: 0.05,
+            tickInterval: 0.5,
+            healPerTick: Math.max(2, Math.round(3 + damage * 0.14)),
+          });
+          ctx.spawnRingParticle(zx, zy, PALETTE.mintLight, zoneRadius * 0.85, 0.35);
+        }
+        return;
+      }
+
+      case 'acid_flask': {
+        const targets = this.pickTargetEnemies(ctx, count, 360);
+        for (let i = 0; i < count; i++) {
+          const t = targets[i];
+          const tx = t
+            ? t.x + (Math.random() - 0.5) * 18
+            : p.x + Math.cos(baseAngle + (i - (count - 1) / 2) * 0.35) * (120 + i * 24);
+          const ty = t
+            ? t.y + (Math.random() - 0.5) * 18
+            : p.y + Math.sin(baseAngle + (i - (count - 1) / 2) * 0.35) * (120 + i * 24);
+          this.zones.push({
+            sourceId: 'acid_flask',
+            visualKind: 'acid_pool',
+            x: tx,
+            y: ty,
+            radius: area,
+            color: PALETTE.butterDark,
+            ringColor: PALETTE.butter,
+            damage,
+            knockback: kb,
+            age: 0,
+            maxLife: stats.duration,
+            tickTimer: 0.04,
+            tickInterval: 0.45,
+            armorShredBonus: 0.3,
+            armorShredDuration: 3.5,
+          });
+          ctx.spawnRingParticle(tx, ty, PALETTE.butter, area, 0.3);
+          ctx.spawnParticles(tx, ty, PALETTE.butterDark, 8, { speedMin: 35, speedMax: 110 });
+        }
+        return;
+      }
+
+      case 'haste_aura': {
+        const auraRadius = area * (ctx.stats.hasAuraRadiusBoost ? 1.25 : 1);
+        ctx.grantHasteInRadius?.(p.x, p.y, auraRadius, 2.8);
+        this.novas.push({
+          sourceId: 'haste_aura',
+          x: p.x,
+          y: p.y,
+          maxRadius: auraRadius,
+          currentRadius: 16,
+          color: PALETTE.butterLight,
+          ringColor: PALETTE.butter,
+          damage,
+          knockback: kb,
+          age: 0,
+          maxLife: stats.duration,
+          hitIds: new Set(),
+          followPlayer: true,
+          killsThisCast: 0,
+          lifestealAwarded: false,
+        });
+        ctx.spawnParticles(p.x, p.y, PALETTE.butter, 12, { speedMin: 55, speedMax: 150 });
+        return;
+      }
+
+      case 'protective_ward': {
+        const auraRadius = 145 * ctx.stats.areaMult * (ctx.stats.hasAuraRadiusBoost ? 1.25 : 1);
+        const shieldAmount = Math.max(10, Math.round(12 + damage * 0.45));
+        ctx.grantShieldInRadius?.(p.x, p.y, auraRadius, shieldAmount, 5.0);
+        const orbitRadius = 68 * Math.sqrt(ctx.stats.areaMult);
+        this.orbits = this.orbits.filter((o) => o.sourceId !== 'protective_ward');
+        this.orbits.push({
+          sourceId: 'protective_ward',
+          visualKind: 'ward',
+          color: PALETTE.butterLight,
+          count,
+          orbitRadius,
+          itemRadius: Math.max(14, area * 0.8),
+          angularSpeed: stats.speed / Math.max(32, orbitRadius),
+          baseAngle: Math.random() * Math.PI * 2,
+          damage,
+          knockback: kb,
+          age: 0,
+          maxLife: stats.duration,
+          hitCooldowns: new Map(),
+          shieldPulseTimer: 1.6,
+          shieldAmount: Math.max(6, Math.round(shieldAmount * 0.5)),
+        });
+        ctx.spawnRingParticle(p.x, p.y, PALETTE.butterLight, auraRadius * 0.7, 0.35);
+        return;
+      }
+
+      case 'venom_nova': {
+        this.novas.push({
+          sourceId: 'venom_nova',
+          x: p.x,
+          y: p.y,
+          maxRadius: area,
+          currentRadius: 12,
+          color: PALETTE.sage,
+          ringColor: PALETTE.mintDark,
+          damage,
+          knockback: kb,
+          age: 0,
+          maxLife: stats.duration,
+          hitIds: new Set(),
+          burnDps: Math.max(8, damage * 0.55),
+          burnDuration: 3.2,
+          burnColor: PALETTE.sage,
+          followPlayer: true,
+          killsThisCast: 0,
+          lifestealAwarded: false,
+        });
+        ctx.spawnParticles(p.x, p.y, PALETTE.sage, 14, { speedMin: 60, speedMax: 165 });
+        return;
+      }
+
+      case 'frost_tonic': {
+        const spread = count > 1 ? Math.min(0.45, (count - 1) * 0.14) : 0;
+        for (let i = 0; i < count; i++) {
+          const angle =
+            count === 1 ? baseAngle : baseAngle - spread / 2 + (spread * i) / (count - 1);
+          this.projectiles.push({
+            kind: 'linear',
+            sourceId: 'frost_tonic',
+            spriteId: 'vial',
+            color: PALETTE.babyBlue,
+            x: p.x,
+            y: p.y,
+            vx: Math.cos(angle) * stats.speed,
+            vy: Math.sin(angle) * stats.speed,
+            speed: stats.speed,
+            radius: 12,
+            damage,
+            knockback: kb,
+            pierceLeft: pierce,
+            age: 0,
+            maxLife: stats.duration,
+            rotation: angle,
+            spinSpeed: 8,
+            scale: 1.9,
+            hitIds: new Set(),
+            explosiveRadius: area,
+            chillDuration: 2.8,
+            chillFactor: 0.48,
+          });
+        }
+        return;
+      }
+
+      case 'bouncing_vial': {
+        const spread = count > 1 ? Math.min(0.55, (count - 1) * 0.16) : 0;
+        for (let i = 0; i < count; i++) {
+          const angle =
+            count === 1 ? baseAngle : baseAngle - spread / 2 + (spread * i) / (count - 1);
+          this.projectiles.push({
+            kind: 'ricochet',
+            sourceId: 'bouncing_vial',
+            spriteId: 'vial',
+            color: PALETTE.coral,
+            x: p.x,
+            y: p.y,
+            vx: Math.cos(angle) * stats.speed,
+            vy: Math.sin(angle) * stats.speed,
+            speed: stats.speed,
+            radius: Math.max(10, area * 0.72),
+            damage,
+            knockback: kb,
+            pierceLeft: Math.max(1, pierce),
+            age: 0,
+            maxLife: stats.duration,
+            rotation: angle,
+            spinSpeed: 10,
+            scale: 1.9,
+            hitIds: new Set(),
+          });
+        }
+        return;
+      }
+
+      case 'revive_totem': {
+        const auraBoost = ctx.stats.hasAuraRadiusBoost ? 1.25 : 1;
+        const maxTotems = Math.min(3, count);
+        const existing = this.totems.filter((t) => t.sourceId === 'revive_totem');
+        while (existing.length >= maxTotems) {
+          const oldest = existing.shift();
+          if (oldest) {
+            const idx = this.totems.indexOf(oldest);
+            if (idx >= 0) this.totems.splice(idx, 1);
+          }
+        }
+        const tx = p.x + Math.cos(baseAngle) * 34;
+        const ty = p.y + Math.sin(baseAngle) * 34;
+        this.totems.push({
+          sourceId: 'revive_totem',
+          x: tx,
+          y: ty,
+          radius: area * auraBoost,
+          damage,
+          speed: stats.speed,
+          pierce,
+          knockback: kb,
+          color: PALETTE.mintLight,
+          age: 0,
+          maxLife: stats.duration,
+          pulseTimer: 0.1,
+          fireTimer: 0.35,
+          isAegisLantern: false,
+          reviveBoostMult: 2.0,
+          soloReviveRate: 0.45,
+        });
+        ctx.spawnRingParticle(tx, ty, PALETTE.mintLight, 56, 0.32);
+        return;
+      }
+
+      case 'gravity_potion': {
+        const targets = this.pickTargetEnemies(ctx, count, 380);
+        for (let i = 0; i < count; i++) {
+          const t = targets[i];
+          const tx = t
+            ? t.x
+            : p.x + Math.cos(baseAngle + (i - (count - 1) / 2) * 0.45) * 140;
+          const ty = t
+            ? t.y
+            : p.y + Math.sin(baseAngle + (i - (count - 1) / 2) * 0.45) * 140;
+          this.zones.push({
+            sourceId: 'gravity_potion',
+            visualKind: 'gravity_vortex',
+            x: tx,
+            y: ty,
+            radius: area,
+            color: PALETTE.lavender,
+            ringColor: PALETTE.lavenderLight,
+            damage,
+            knockback: 0,
+            age: 0,
+            maxLife: stats.duration,
+            tickTimer: 0.08,
+            tickInterval: 0.45,
+            pullStrength: 105,
+          });
+          ctx.spawnRingParticle(tx, ty, PALETTE.lavenderLight, area, 0.3);
+        }
+        return;
+      }
+
+      case 'starlight_elixir': {
+        const spread = count > 1 ? Math.min(1.0, (count - 1) * 0.24) : 0;
+        for (let i = 0; i < count; i++) {
+          const angle =
+            count === 1 ? baseAngle : baseAngle - spread / 2 + (spread * i) / (count - 1);
+          this.projectiles.push({
+            kind: 'homing',
+            sourceId: 'starlight_elixir',
+            spriteId: 'vial',
+            color: PALETTE.coralLight,
+            x: p.x,
+            y: p.y,
+            vx: Math.cos(angle) * stats.speed,
+            vy: Math.sin(angle) * stats.speed,
+            speed: stats.speed,
+            radius: Math.max(10, area * 0.75),
+            damage,
+            knockback: kb,
+            pierceLeft: pierce,
+            age: 0,
+            maxLife: stats.duration,
+            rotation: angle,
+            spinSpeed: 9,
+            scale: 1.85,
+            hitIds: new Set(),
+            turnRate: 7.4,
+            retargetOnPierce: true,
+            grantStarlightBuffOnHit: true,
+          });
+        }
+        return;
+      }
+
       default:
         assertNever(id);
     }
@@ -1736,6 +2069,173 @@ export class AbilityRunner {
         return;
       }
 
+      // ----------------------------------------------------------------------
+      // ALCHEMIST SYNERGIES (5)
+      // ----------------------------------------------------------------------
+      case 'sanctuary_choir': {
+        const auraBoost = ctx.stats.hasAuraRadiusBoost ? 1.25 : 1;
+        const zoneRadius = area * auraBoost;
+        for (let i = 0; i < count; i++) {
+          const offsetAngle = baseAngle + (i * Math.PI * 2) / Math.max(1, count);
+          const dist = i === 0 ? 12 : 68;
+          const zx = p.x + Math.cos(offsetAngle) * dist;
+          const zy = p.y + Math.sin(offsetAngle) * dist;
+          this.zones.push({
+            sourceId: 'sanctuary_choir',
+            visualKind: 'sanctuary_choir',
+            x: zx,
+            y: zy,
+            radius: zoneRadius,
+            color: PALETTE.mint,
+            ringColor: PALETTE.butter,
+            damage,
+            knockback: kb,
+            age: 0,
+            maxLife: stats.duration,
+            tickTimer: 0.04,
+            tickInterval: 0.42,
+            healPerTick: Math.max(5, Math.round(6 + damage * 0.14)),
+            grantHasteSec: 2.8,
+          });
+          ctx.spawnRingParticle(zx, zy, PALETTE.butter, zoneRadius, 0.4);
+        }
+        return;
+      }
+
+      case 'caustic_singularity': {
+        const targets = this.pickTargetEnemies(ctx, count, 400);
+        for (let i = 0; i < count; i++) {
+          const t = targets[i];
+          const tx = t
+            ? t.x
+            : p.x + Math.cos(baseAngle + (i - (count - 1) / 2) * 0.5) * 145;
+          const ty = t
+            ? t.y
+            : p.y + Math.sin(baseAngle + (i - (count - 1) / 2) * 0.5) * 145;
+          this.zones.push({
+            sourceId: 'caustic_singularity',
+            visualKind: 'caustic_singularity',
+            x: tx,
+            y: ty,
+            radius: area,
+            color: PALETTE.butterDark,
+            ringColor: PALETTE.lavender,
+            damage,
+            knockback: 0,
+            age: 0,
+            maxLife: stats.duration,
+            tickTimer: 0.04,
+            tickInterval: 0.38,
+            armorShredBonus: 0.45,
+            armorShredDuration: 4.5,
+            pullStrength: 155,
+            burnDps: Math.max(14, damage * 0.5),
+            burnDuration: 3.0,
+          });
+          ctx.spawnRingParticle(tx, ty, PALETTE.butterDark, area, 0.38);
+          ctx.spawnParticles(tx, ty, PALETTE.butter, 12, { speedMin: 45, speedMax: 140 });
+        }
+        return;
+      }
+
+      case 'aegis_lantern': {
+        const auraBoost = ctx.stats.hasAuraRadiusBoost ? 1.25 : 1;
+        const maxLanterns = Math.min(3, count);
+        const existing = this.totems.filter((t) => t.sourceId === 'aegis_lantern');
+        while (existing.length >= maxLanterns) {
+          const oldest = existing.shift();
+          if (oldest) {
+            const idx = this.totems.indexOf(oldest);
+            if (idx >= 0) this.totems.splice(idx, 1);
+          }
+        }
+        const tx = p.x + Math.cos(baseAngle) * 38;
+        const ty = p.y + Math.sin(baseAngle) * 38;
+        const lanternRadius = area * auraBoost;
+        this.totems.push({
+          sourceId: 'aegis_lantern',
+          x: tx,
+          y: ty,
+          radius: lanternRadius,
+          damage,
+          speed: stats.speed,
+          pierce,
+          knockback: kb,
+          color: PALETTE.butter,
+          age: 0,
+          maxLife: stats.duration,
+          pulseTimer: 0.08,
+          fireTimer: 0.25,
+          isAegisLantern: true,
+          reviveBoostMult: 2.5,
+          soloReviveRate: 0.75,
+        });
+        ctx.grantShieldInRadius?.(tx, ty, lanternRadius, Math.max(18, Math.round(damage * 0.4)), 6.0);
+        ctx.spawnRingParticle(tx, ty, PALETTE.butter, lanternRadius * 0.7, 0.42);
+        return;
+      }
+
+      case 'plague_glacier': {
+        this.novas.push({
+          sourceId: 'plague_glacier',
+          x: p.x,
+          y: p.y,
+          maxRadius: area,
+          currentRadius: 14,
+          color: PALETTE.babyBlue,
+          ringColor: PALETTE.mint,
+          damage,
+          knockback: kb,
+          age: 0,
+          maxLife: stats.duration,
+          hitIds: new Set(),
+          chillDuration: 3.6,
+          chillFactor: 0.35,
+          freezeDuration: 1.4,
+          burnDps: Math.max(18, damage * 0.55),
+          burnDuration: 4.0,
+          burnColor: PALETTE.sage,
+          shatterBonus: true,
+          followPlayer: true,
+          killsThisCast: 0,
+          lifestealAwarded: false,
+        });
+        ctx.spawnParticles(p.x, p.y, PALETTE.babyBlueLight, 18, { speedMin: 70, speedMax: 195 });
+        return;
+      }
+
+      case 'celestial_panacea': {
+        const spread = count > 1 ? Math.min(0.75, (count - 1) * 0.16) : 0;
+        for (let i = 0; i < count; i++) {
+          const angle =
+            count === 1 ? baseAngle : baseAngle - spread / 2 + (spread * i) / (count - 1);
+          this.projectiles.push({
+            kind: 'ricochet',
+            sourceId: 'celestial_panacea',
+            spriteId: 'vial',
+            color: PALETTE.coral,
+            x: p.x,
+            y: p.y,
+            vx: Math.cos(angle) * stats.speed,
+            vy: Math.sin(angle) * stats.speed,
+            speed: stats.speed,
+            radius: Math.max(13, area * 0.55),
+            damage,
+            knockback: kb,
+            pierceLeft: Math.max(4, pierce),
+            age: 0,
+            maxLife: stats.duration,
+            rotation: angle,
+            spinSpeed: 12,
+            scale: 2.15,
+            hitIds: new Set(),
+            grantStarlightBuffOnHit: true,
+            bonusCritChance: 0.12,
+          });
+        }
+        return;
+      }
+
       default:
         assertNever(id);
     }
@@ -1947,7 +2447,9 @@ export class AbilityRunner {
             proj.color,
             ctx,
             proj.burnDps,
-            proj.burnDuration
+            proj.burnDuration,
+            proj.chillDuration,
+            proj.chillFactor
           );
           if (proj.clusterShrapnelCount && proj.clusterShrapnelCount > 0) {
             this.spawnClusterShrapnel(
@@ -1970,9 +2472,15 @@ export class AbilityRunner {
             burnDps: proj.burnDps,
             burnDuration: proj.burnDuration,
             burnColor: proj.burnColor,
+            armorShredDuration: proj.armorShredDuration,
+            armorShredBonus: proj.armorShredBonus,
             shatterBonus: proj.shatterBonus,
             bonusCritChance: proj.bonusCritChance,
           });
+          if (proj.grantStarlightBuffOnHit) {
+            const auraR = 190 * ctx.stats.areaMult * (ctx.stats.hasAuraRadiusBoost ? 1.25 : 1);
+            ctx.grantStarlightInRadius?.(p.x, p.y, auraR, 2.6);
+          }
         }
 
         // Valkyrie Blitz chain-dash retargeting
@@ -2071,7 +2579,9 @@ export class AbilityRunner {
     color: string,
     ctx: CombatContext,
     burnDps?: number,
-    burnDuration?: number
+    burnDuration?: number,
+    chillDuration?: number,
+    chillFactor?: number
   ): void {
     const victims = ctx.spatialHash.queryRadius(x, y, radius, this.queryBuf);
     for (let i = 0; i < victims.length; i++) {
@@ -2085,6 +2595,8 @@ export class AbilityRunner {
         burnDps,
         burnDuration,
         burnColor: color,
+        chillDuration,
+        chillFactor,
       });
     }
     ctx.spawnRingParticle(x, y, color, radius, 0.28);
@@ -2295,6 +2807,10 @@ export class AbilityRunner {
           freezeDuration: n.freezeDuration,
           stunDuration: n.stunDuration,
           tauntDuration: n.tauntDuration,
+          burnDps: n.burnDps,
+          burnDuration: n.burnDuration,
+          burnColor: n.burnColor,
+          shatterBonus: n.shatterBonus,
         });
         if (died) {
           n.killsThisCast++;
@@ -2325,6 +2841,17 @@ export class AbilityRunner {
         const next = cd - dt;
         if (next <= 0) orb.hitCooldowns.delete(eid);
         else orb.hitCooldowns.set(eid, next);
+      }
+
+      // Protective Ward periodic shield pulse to self & nearby teammates
+      if (orb.shieldPulseTimer !== undefined && orb.shieldAmount) {
+        orb.shieldPulseTimer -= dt;
+        if (orb.shieldPulseTimer <= 0) {
+          orb.shieldPulseTimer = 1.6;
+          const auraRadius = 145 * ctx.stats.areaMult * (ctx.stats.hasAuraRadiusBoost ? 1.25 : 1);
+          ctx.grantShieldInRadius?.(p.x, p.y, auraRadius, orb.shieldAmount, 4.5);
+          ctx.spawnRingParticle(p.x, p.y, PALETTE.butterLight, auraRadius * 0.55, 0.28);
+        }
       }
 
       // Eclipse Singularity gravity_drag
@@ -2743,6 +3270,135 @@ export class AbilityRunner {
   }
 
 
+  private updateZones(dt: number, ctx: CombatContext): void {
+    for (let i = this.zones.length - 1; i >= 0; i--) {
+      const z = this.zones[i];
+      z.age += dt;
+      if (z.age >= z.maxLife) {
+        this.zones.splice(i, 1);
+        continue;
+      }
+
+      // Continuous gravity vortex pull for Gravity Potion / Caustic Singularity
+      if (z.pullStrength && z.pullStrength > 0) {
+        const nearby = ctx.spatialHash.queryRadius(z.x, z.y, z.radius, this.queryBuf);
+        for (let k = 0; k < nearby.length; k++) {
+          const e = nearby[k];
+          if (!e.alive) continue;
+          const dx = z.x - e.x;
+          const dy = z.y - e.y;
+          const dist = Math.hypot(dx, dy);
+          if (dist > 8) {
+            const resist = e.isBoss ? 0.85 : e.knockbackResist * 0.6;
+            const pull = z.pullStrength * (1 - resist) * dt;
+            e.x += (dx / dist) * pull;
+            e.y += (dy / dist) * pull;
+          }
+        }
+      }
+
+      z.tickTimer -= dt;
+      if (z.tickTimer <= 0) {
+        z.tickTimer = z.tickInterval;
+
+        // Ally support ticks (heal + haste)
+        if (z.healPerTick && z.healPerTick > 0) {
+          if (ctx.healAlliesInRadius) {
+            ctx.healAlliesInRadius(
+              z.x,
+              z.y,
+              z.radius,
+              z.healPerTick,
+              ctx.stats.hasOverhealToShield
+            );
+          } else {
+            const pd = Math.hypot(ctx.player.x - z.x, ctx.player.y - z.y);
+            if (pd <= z.radius) {
+              ctx.healPlayer(z.healPerTick);
+            }
+          }
+        }
+        if (z.grantHasteSec && z.grantHasteSec > 0) {
+          ctx.grantHasteInRadius?.(z.x, z.y, z.radius, z.grantHasteSec);
+        }
+
+        // Enemy damage & armor shred ticks
+        const victims = ctx.spatialHash.queryRadius(z.x, z.y, z.radius, this.queryBuf);
+        for (let v = 0; v < victims.length; v++) {
+          const enemy = victims[v];
+          if (!enemy.alive) continue;
+          ctx.damageEnemy(enemy, z.damage, {
+            knockback: z.knockback,
+            sourceX: z.x,
+            sourceY: z.y,
+            color: z.color,
+            armorShredBonus: z.armorShredBonus,
+            armorShredDuration: z.armorShredDuration,
+            burnDps: z.burnDps,
+            burnDuration: z.burnDuration,
+            burnColor: z.color,
+            silent: true,
+          });
+        }
+      }
+    }
+  }
+
+  private updateTotems(dt: number, ctx: CombatContext): void {
+    for (let i = this.totems.length - 1; i >= 0; i--) {
+      const t = this.totems[i];
+      t.age += dt;
+      if (t.age >= t.maxLife) {
+        this.totems.splice(i, 1);
+        continue;
+      }
+
+      // Periodic ally regen & shield pulse
+      t.pulseTimer -= dt;
+      if (t.pulseTimer <= 0) {
+        t.pulseTimer = 1.0;
+        ctx.grantTotemRegenInRadius?.(t.x, t.y, t.radius, 1.4);
+        if (t.isAegisLantern) {
+          ctx.grantShieldInRadius?.(t.x, t.y, t.radius, Math.max(8, Math.round(t.damage * 0.18)), 4.5);
+        }
+      }
+
+      // Gentle light bolts at nearest threat so Revive Totem is impactful in Solo too
+      t.fireTimer -= dt;
+      if (t.fireTimer <= 0) {
+        const target = ctx.spatialHash.findNearest(t.x, t.y, t.radius * 1.45, (e) => e.alive);
+        if (target) {
+          t.fireTimer = t.isAegisLantern ? 0.55 : 0.8;
+          const angle = Math.atan2(target.y - t.y, target.x - t.x);
+          this.projectiles.push({
+            kind: 'homing',
+            sourceId: t.sourceId,
+            spriteId: 'arcane',
+            color: t.isAegisLantern ? PALETTE.butter : PALETTE.mintLight,
+            x: t.x,
+            y: t.y,
+            vx: Math.cos(angle) * t.speed,
+            vy: Math.sin(angle) * t.speed,
+            speed: t.speed,
+            radius: t.isAegisLantern ? 12 : 9,
+            damage: t.damage,
+            knockback: t.knockback,
+            pierceLeft: t.pierce,
+            age: 0,
+            maxLife: 1.5,
+            rotation: angle,
+            spinSpeed: 6,
+            scale: t.isAegisLantern ? 2.0 : 1.7,
+            hitIds: new Set(),
+            turnRate: 6.5,
+          });
+        } else {
+          t.fireTimer = 0.25;
+        }
+      }
+    }
+  }
+
   /**
    * Exposes read-only combat effect arrays for the client Canvas renderer.
    */
@@ -2757,6 +3413,8 @@ export class AbilityRunner {
       chains: this.chainArcs,
       turrets: this.turrets,
       trails: this.trails,
+      zones: this.zones,
+      totems: this.totems,
     };
   }
 }

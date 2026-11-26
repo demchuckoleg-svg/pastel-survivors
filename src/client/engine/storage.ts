@@ -37,7 +37,7 @@ export interface SaveData {
 
 const STORAGE_KEY = 'pastel_survivors_save_v1';
 const SAVE_VERSION = 1;
-const HERO_IDS: readonly HeroId[] = ['mage', 'ranger', 'knight'];
+const HERO_IDS: readonly HeroId[] = ['mage', 'ranger', 'knight', 'alchemist'];
 
 function createEmptyRecord(): BestRunRecord {
   return {
@@ -62,6 +62,7 @@ function createDefaultSaveData(): SaveData {
       mage: createEmptyRecord(),
       ranger: createEmptyRecord(),
       knight: createEmptyRecord(),
+      alchemist: createEmptyRecord(),
     },
   };
 }
@@ -175,6 +176,7 @@ export function getAllBestRuns(): Record<HeroId, BestRunRecord> {
     mage: { ...data.bestRuns.mage },
     ranger: { ...data.bestRuns.ranger },
     knight: { ...data.bestRuns.knight },
+    alchemist: { ...data.bestRuns.alchemist },
   };
 }
 

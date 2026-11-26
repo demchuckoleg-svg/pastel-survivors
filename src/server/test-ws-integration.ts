@@ -356,6 +356,17 @@ function testProtocolBinaryRoundTrips(): void {
     },
     { type: 'PlayerDowned', playerId: 2, x: -30, y: 88 },
     { type: 'PlayerRevived', playerId: 2, reason: 'circle', hpPct: 20, x: -30, y: 88, reviverMask: 1 },
+    {
+      type: 'BossHazard',
+      hazardKind: 'arena_ring',
+      x: 40,
+      y: -60,
+      targetX: 0,
+      targetY: 0,
+      radius: 310,
+      durationMs: 1200,
+      active: true,
+    },
   ];
   const decodedEvents = decodeBinaryEvents(encodeBinaryEvents(combatEvents));
   assert.equal(decodedEvents.length, combatEvents.length);
@@ -367,6 +378,12 @@ function testProtocolBinaryRoundTrips(): void {
   assert.equal(decodedEvents[3].type, 'BossTelegraph');
   if (decodedEvents[3].type === 'BossTelegraph') {
     assert.equal(decodedEvents[3].attackId, 'wisteria_bloom_beam');
+  }
+  assert.equal(decodedEvents[6].type, 'BossHazard');
+  if (decodedEvents[6].type === 'BossHazard') {
+    assert.equal(decodedEvents[6].hazardKind, 'arena_ring');
+    assert.equal(decodedEvents[6].radius, 310);
+    assert.equal(decodedEvents[6].active, true);
   }
 
   // Client binary INPUT & PICK_UPGRADE round-trip

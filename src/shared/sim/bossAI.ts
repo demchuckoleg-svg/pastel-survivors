@@ -40,6 +40,26 @@ export interface BossTelegraphInfo {
   color: string;
 }
 
+export interface BossHazardInfo {
+  hazardKind: 'arena_ring' | 'meteor_mark' | 'tether_beam';
+  x: number;
+  y: number;
+  targetX: number;
+  targetY: number;
+  radius: number;
+  durationMs: number;
+  active: boolean;
+}
+
+export interface BossPlayerRef {
+  id: string;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  radius: number;
+}
+
 export interface BossAIContext {
   player: {
     x: number;
@@ -48,8 +68,12 @@ export interface BossAIContext {
     vy: number;
     radius: number;
   };
+  allAlivePlayers?: readonly BossPlayerRef[];
+  playerCount?: number;
   elapsedRunSec: number;
   damagePlayer: (rawDamage: number) => void;
+  damagePlayerById?: (playerId: string, rawDamage: number) => void;
+  getEnemyById?: (enemyId: number) => EnemyEntity | undefined;
   spawnEnemyProjectile: (opts: BossProjectileParams) => void;
   spawnMinion: (
     archetypeId: EnemySpriteId,
@@ -82,6 +106,7 @@ export interface BossAIContext {
   addScreenShake: (intensity: number, durationSec: number) => void;
   getMinionCount: () => number;
   onTelegraph?: (info: BossTelegraphInfo) => void;
+  onHazard?: (info: BossHazardInfo) => void;
 }
 
 const DEFAULT_VISUAL: BossVisualState = {
@@ -195,6 +220,9 @@ function createEmptyAttackData(): BossAttackData {
     secondWaveFired: false,
     dashesRemaining: 0,
     summonSpots: [],
+    meteors: [],
+    tetherHalfWidth: 12,
+    coneSpread: 1.05,
   };
 }
 
@@ -296,6 +324,13 @@ export class BossAIManager {
     };
   }
 
+  public triggerEnrage(enemyId: number): void {
+    const rt = this.runtimes.get(enemyId);
+    if (rt && !rt.enraged) {
+      rt.enraged = true;
+    }
+  }
+
   /**
    * Steps a single boss entity's state machine for the current frame.
    * Returns true if contact damage should be evaluated normally this frame.
@@ -316,6 +351,11 @@ export class BossAIManager {
       });
       ctx.spawnFloatingText(enemy.x, enemy.y - enemy.radius - 18, 'ENRAGED!', rt.def.accentColor, true);
       ctx.addScreenShake(4.5, 0.22);
+    }
+
+    // Tick Countess Tiramisu's persistent shrinking pastel arena ring
+    if (rt.arenaRing && (rt.arenaRing.telegraphing || rt.arenaRing.active)) {
+      this.updateArenaRing(rt, dt, ctx);
     }
 
     // Tick individual attack cooldowns & global cooldown
@@ -358,6 +398,73 @@ export class BossAIManager {
     return !rt.airborne;
   }
 
+  private updateArenaRing(rt: BossRuntime, dt: number, ctx: BossAIContext): void {
+    const ring = rt.arenaRing;
+    if (!ring) return;
+
+    ring.elapsed += dt;
+    if (ring.telegraphing) {
+      if (ring.elapsed >= ring.telegraphDuration) {
+        ring.telegraphing = false;
+        ring.active = true;
+        ring.elapsed = 0;
+        ring.tickTimer = 0.2;
+        ctx.onHazard?.({
+          hazardKind: 'arena_ring',
+          x: ring.centerX,
+          y: ring.centerY,
+          targetX: 0,
+          targetY: 0,
+          radius: ring.radius,
+          durationMs: Math.round(ring.activeDuration * 1000),
+          active: true,
+        });
+      }
+      return;
+    }
+
+    if (ring.active) {
+      const shrinkRatio = Math.min(1, ring.elapsed / Math.max(0.1, ring.activeDuration * 0.72));
+      ring.radius = ring.startRadius - (ring.startRadius - ring.minRadius) * shrinkRatio;
+
+      ring.tickTimer -= dt;
+      if (ring.tickTimer <= 0) {
+        ring.tickTimer = 0.65;
+        const players = ctx.allAlivePlayers ?? [{ id: 'local', ...ctx.player }];
+        for (let i = 0; i < players.length; i++) {
+          const pl = players[i];
+          const d = Math.hypot(pl.x - ring.centerX, pl.y - ring.centerY);
+          if (d > ring.radius - pl.radius * 0.3) {
+            if (ctx.damagePlayerById) {
+              ctx.damagePlayerById(pl.id, ring.damage);
+            } else {
+              ctx.damagePlayer(ring.damage);
+            }
+          }
+        }
+        // Broadcast updated shrinking radius for Co-op clients
+        const remainingMs = Math.max(0, Math.round((ring.activeDuration - ring.elapsed) * 1000));
+        if (remainingMs > 0) {
+          ctx.onHazard?.({
+            hazardKind: 'arena_ring',
+            x: ring.centerX,
+            y: ring.centerY,
+            targetX: 0,
+            targetY: 0,
+            radius: ring.radius,
+            durationMs: remainingMs,
+            active: true,
+          });
+        }
+      }
+
+      if (ring.elapsed >= ring.activeDuration) {
+        ring.active = false;
+        rt.arenaRing = undefined;
+      }
+    }
+  }
+
   // ==========================================================================
   // STATE MACHINE PHASES
   // ==========================================================================
@@ -380,7 +487,16 @@ export class BossAIManager {
       const nx = dx / dist;
       const ny = dy / dist;
 
-      if (rt.bossId === 'lady_wisteria' && dist < 240) {
+      if (rt.bossId === 'twin_macaron_rose') {
+        // Rose Macaron orbits gracefully at range (~240px) firing spirals & maintaining tether angle
+        const approachWeight = dist < 190 ? -0.55 : dist > 290 ? 0.65 : 0.1;
+        const strafeWeight = 0.9 * rt.orbitDir;
+        const mvx = nx * approachWeight - ny * strafeWeight;
+        const mvy = ny * approachWeight + nx * strafeWeight;
+        const mLen = Math.hypot(mvx, mvy) || 1;
+        enemy.vx = (mvx / mLen) * spd;
+        enemy.vy = (mvy / mLen) * spd;
+      } else if (rt.bossId === 'lady_wisteria' && dist < 240) {
         // Lady Wisteria weaves gracefully at mid-range
         const approachWeight = dist < 130 ? -0.35 : 0.45;
         const strafeWeight = 0.85 * rt.orbitDir;
@@ -414,7 +530,7 @@ export class BossAIManager {
   }
 
   private pickNextAttack(
-    _enemy: EnemyEntity,
+    enemy: EnemyEntity,
     rt: BossRuntime,
     distToPlayer: number,
     ctx: BossAIContext
@@ -425,6 +541,15 @@ export class BossAIManager {
       if ((rt.attackCooldowns[atk.id] ?? 0) > 0) continue;
       // Avoid flooding the arena if too many mini-slimes are already active
       if (atk.id === 'mochi_summon_adds' && ctx.getMinionCount() >= 14) continue;
+      // Tether requires Mint Macaron partner to still be alive
+      if (atk.id === 'macaron_tether_surge') {
+        const partner = enemy.linkedBossId ? ctx.getEnemyById?.(enemy.linkedBossId) : undefined;
+        if (!partner || !partner.alive) continue;
+      }
+      // Avoid recasting Velvet Enclosure while arena ring is still active
+      if (atk.id === 'tiramisu_arena_ring' && rt.arenaRing && (rt.arenaRing.active || rt.arenaRing.telegraphing)) {
+        continue;
+      }
       ready.push(atk);
     }
     if (ready.length === 0) return null;
@@ -442,6 +567,9 @@ export class BossAIManager {
       else if (atk.id === 'wisteria_blink_dash') w = distToPlayer > 150 ? 1.9 : 1.0;
       else if (atk.id === 'aegis_lance_charge') w = distToPlayer > 170 ? 2.1 : 1.0;
       else if (atk.id === 'aegis_bastion_nova') w = distToPlayer < 250 ? 1.9 : 1.1;
+      else if (atk.id === 'macaron_mint_dash') w = distToPlayer > 150 ? 2.0 : 1.1;
+      else if (atk.id === 'tiramisu_arena_ring') w = 2.4;
+      else if (atk.id === 'tiramisu_meteor_marks') w = 1.8;
       totalWeight += w;
       return w;
     });
@@ -572,6 +700,132 @@ export class BossAIManager {
         data.innerDangerRadius = 108;
         data.outerSafeRadius = 192;
         data.outerDangerRadius = 305;
+        break;
+      }
+
+      // ---- THE TWIN MACARONS (MINT & ROSE) ----
+      case 'macaron_mint_slam': {
+        const leadX = ctx.player.x + ctx.player.vx * 0.2;
+        const leadY = ctx.player.y + ctx.player.vy * 0.2;
+        const ldx = leadX - enemy.x;
+        const ldy = leadY - enemy.y;
+        const lDist = Math.hypot(ldx, ldy);
+        const maxJump = 290;
+        const clampRatio = lDist > maxJump ? maxJump / lDist : 1;
+        data.startX = enemy.x;
+        data.startY = enemy.y;
+        data.targetX = enemy.x + ldx * clampRatio;
+        data.targetY = enemy.y + ldy * clampRatio;
+        data.radius = 94 + Math.min(18, rt.cycle * 6);
+        break;
+      }
+
+      case 'macaron_mint_dash': {
+        this.lockDashLane(enemy, data, angleToPlayer, 360, 28);
+        break;
+      }
+
+      case 'macaron_rose_spiral': {
+        data.baseAngle = angleToPlayer;
+        data.radius = 70;
+        data.rotDir = rt.orbitDir;
+        break;
+      }
+
+      case 'macaron_tether_surge': {
+        const isSolo = (ctx.playerCount ?? 1) <= 1;
+        data.tetherHalfWidth = isSolo ? 8 : 14;
+        data.radius = data.tetherHalfWidth;
+        const partner = enemy.linkedBossId ? ctx.getEnemyById?.(enemy.linkedBossId) : undefined;
+        if (partner && partner.alive) {
+          data.targetX = partner.x;
+          data.targetY = partner.y;
+          ctx.onHazard?.({
+            hazardKind: 'tether_beam',
+            x: partner.x,
+            y: partner.y,
+            targetX: enemy.x,
+            targetY: enemy.y,
+            radius: data.tetherHalfWidth,
+            durationMs: Math.round(rt.stateDuration * 1000),
+            active: false,
+          });
+        }
+        break;
+      }
+
+      // ---- COUNTESS TIRAMISU ----
+      case 'tiramisu_arena_ring': {
+        // Center arena ring on midpoint between Countess and target hero
+        const cx = (enemy.x + ctx.player.x) * 0.5;
+        const cy = (enemy.y + ctx.player.y) * 0.5;
+        const startR = 390;
+        const minR = (ctx.playerCount ?? 1) <= 1 ? 235 : 215;
+        const minutes = ctx.elapsedRunSec / 60;
+        const dmgScale = getBossDamageScale(minutes, rt.encounterIndex);
+        data.targetX = cx;
+        data.targetY = cy;
+        data.radius = startR;
+        rt.arenaRing = {
+          active: false,
+          telegraphing: true,
+          centerX: cx,
+          centerY: cy,
+          radius: startR,
+          startRadius: startR,
+          minRadius: minR,
+          elapsed: 0,
+          telegraphDuration: rt.stateDuration,
+          activeDuration: 10.5,
+          tickTimer: 0.25,
+          damage: Math.round(atk.damage * dmgScale),
+        };
+        ctx.onHazard?.({
+          hazardKind: 'arena_ring',
+          x: cx,
+          y: cy,
+          targetX: 0,
+          targetY: 0,
+          radius: startR,
+          durationMs: Math.round(rt.stateDuration * 1000),
+          active: false,
+        });
+        break;
+      }
+
+      case 'tiramisu_meteor_marks': {
+        const aliveList = ctx.allAlivePlayers ?? [{ id: 'local', ...ctx.player }];
+        const maxMarks = (ctx.playerCount ?? aliveList.length) <= 1 ? 1 : Math.min(2, aliveList.length);
+        const shuffled = [...aliveList];
+        for (let i = shuffled.length - 1; i > 0; i--) {
+          const j = Math.floor(Math.random() * (i + 1));
+          const tmp = shuffled[i];
+          shuffled[i] = shuffled[j];
+          shuffled[j] = tmp;
+        }
+        const meteorRadius = 72 + Math.min(14, rt.cycle * 6);
+        data.radius = meteorRadius;
+        for (let i = 0; i < maxMarks; i++) {
+          const pl = shuffled[i];
+          data.meteors.push({
+            x: pl.x,
+            y: pl.y,
+            radius: meteorRadius,
+            trackDuration: 0.65,
+            lockDuration: 0.85,
+            elapsed: 0,
+            locked: false,
+            impacted: false,
+            targetPlayerId: pl.id,
+          });
+        }
+        break;
+      }
+
+      case 'tiramisu_cone_volley': {
+        data.baseAngle = angleToPlayer;
+        data.coneSpread = 1.05;
+        data.radius = 120;
         break;
       }
     }
@@ -792,6 +1046,79 @@ export class BossAIManager {
           sizeMax: 7,
         });
         ctx.addScreenShake(7.5, 0.32);
+        break;
+      }
+
+      // ---- THE TWIN MACARONS (MINT & ROSE) ----
+      case 'macaron_mint_slam': {
+        rt.stateDuration = 0.42;
+        rt.airborne = true;
+        rt.scaleX = 0.86;
+        rt.scaleY = 1.22;
+        ctx.spawnParticles(enemy.x, enemy.y + 10, PALETTE.mintLight, 10, {
+          speedMin: 40,
+          speedMax: 120,
+        });
+        break;
+      }
+
+      case 'macaron_mint_dash': {
+        rt.stateDuration = 0.5;
+        ctx.addScreenShake(3.5, 0.18);
+        ctx.spawnParticles(enemy.x, enemy.y, PALETTE.mint, 12, {
+          speedMin: 55,
+          speedMax: 150,
+        });
+        break;
+      }
+
+      case 'macaron_rose_spiral': {
+        const isSolo = (ctx.playerCount ?? 1) <= 1;
+        rt.stateDuration = isSolo ? 1.45 : 1.75;
+        rt.data.tickTimer = 0;
+        ctx.spawnRingParticle(enemy.x, enemy.y, PALETTE.rose, 76, 0.32);
+        break;
+      }
+
+      case 'macaron_tether_surge': {
+        rt.stateDuration = 2.15;
+        rt.data.tickTimer = 0;
+        const partner = enemy.linkedBossId ? ctx.getEnemyById?.(enemy.linkedBossId) : undefined;
+        if (partner && partner.alive) {
+          ctx.onHazard?.({
+            hazardKind: 'tether_beam',
+            x: partner.x,
+            y: partner.y,
+            targetX: enemy.x,
+            targetY: enemy.y,
+            radius: rt.data.tetherHalfWidth,
+            durationMs: Math.round(rt.stateDuration * 1000),
+            active: true,
+          });
+          ctx.addScreenShake(4.2, 0.22);
+        }
+        break;
+      }
+
+      // ---- COUNTESS TIRAMISU ----
+      case 'tiramisu_arena_ring': {
+        rt.stateDuration = 0.25;
+        ctx.spawnRingParticle(rt.data.targetX, rt.data.targetY, PALETTE.peach, 160, 0.45);
+        ctx.addScreenShake(4.0, 0.2);
+        break;
+      }
+
+      case 'tiramisu_meteor_marks': {
+        // Total duration covers trackDuration (0.65) + lockDuration (0.85) + brief aftermath
+        rt.stateDuration = 1.65;
+        break;
+      }
+
+      case 'tiramisu_cone_volley': {
+        rt.stateDuration = 1.1;
+        rt.data.tickTimer = 0;
+        rt.data.stepCount = 0;
+        ctx.spawnRingParticle(enemy.x, enemy.y, PALETTE.peach, 84, 0.32);
         break;
       }
     }
@@ -1140,6 +1467,290 @@ export class BossAIManager {
         enemy.vy = 0;
         if (progress >= 1) {
           this.enterRecover(rt, 0.5);
+        }
+        break;
+      }
+
+      // ---- THE TWIN MACARONS (MINT & ROSE) ----
+      case 'macaron_mint_slam': {
+        enemy.vx = 0;
+        enemy.vy = 0;
+        const eased =
+          progress < 0.5
+            ? 2 * progress * progress
+            : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+        enemy.x = rt.data.startX + (rt.data.targetX - rt.data.startX) * eased;
+        enemy.y = rt.data.startY + (rt.data.targetY - rt.data.startY) * eased;
+        rt.jumpHeight = Math.sin(progress * Math.PI) * 96;
+        rt.airborne = progress < 0.94;
+
+        if (progress >= 1) {
+          enemy.x = rt.data.targetX;
+          enemy.y = rt.data.targetY;
+          rt.jumpHeight = 0;
+          rt.airborne = false;
+          rt.scaleX = 1.28;
+          rt.scaleY = 0.74;
+
+          const players = ctx.allAlivePlayers ?? [{ id: 'local', ...ctx.player }];
+          for (let i = 0; i < players.length; i++) {
+            const pl = players[i];
+            const pDist = Math.hypot(pl.x - enemy.x, pl.y - enemy.y);
+            if (pDist <= rt.data.radius + pl.radius * 0.65) {
+              if (ctx.damagePlayerById) ctx.damagePlayerById(pl.id, dmg);
+              else ctx.damagePlayer(dmg);
+            }
+          }
+
+          ctx.spawnRingParticle(enemy.x, enemy.y, PALETTE.mint, rt.data.radius + 14, 0.38);
+          ctx.spawnParticles(enemy.x, enemy.y, PALETTE.mintLight, 18, {
+            speedMin: 65,
+            speedMax: 200,
+            sizeMin: 4,
+            sizeMax: 7,
+          });
+          ctx.addScreenShake(5.5, 0.24);
+          this.enterRecover(rt, 0.45);
+        }
+        break;
+      }
+
+      case 'macaron_mint_dash': {
+        enemy.vx = 0;
+        enemy.vy = 0;
+        const eased = 1 - Math.pow(1 - progress, 2);
+        enemy.x = rt.data.startX + (rt.data.targetX - rt.data.startX) * eased;
+        enemy.y = rt.data.startY + (rt.data.targetY - rt.data.startY) * eased;
+        enemy.facingLeft = rt.data.targetX < rt.data.startX;
+
+        const players = ctx.allAlivePlayers ?? [{ id: 'local', ...ctx.player }];
+        for (let i = 0; i < players.length; i++) {
+          const pl = players[i];
+          const hitDist = enemy.radius + pl.radius + 4;
+          const pdx = pl.x - enemy.x;
+          const pdy = pl.y - enemy.y;
+          if (pdx * pdx + pdy * pdy <= hitDist * hitDist) {
+            if (ctx.damagePlayerById) ctx.damagePlayerById(pl.id, dmg);
+            else ctx.damagePlayer(dmg);
+          }
+        }
+
+        rt.data.tickTimer -= dt;
+        if (rt.data.tickTimer <= 0) {
+          rt.data.tickTimer = 0.06;
+          ctx.spawnParticles(enemy.x, enemy.y, PALETTE.mintLight, 3, {
+            speedMin: 25,
+            speedMax: 95,
+          });
+        }
+
+        if (progress >= 1) {
+          enemy.x = rt.data.targetX;
+          enemy.y = rt.data.targetY;
+          ctx.spawnRingParticle(enemy.x, enemy.y, PALETTE.mint, 72, 0.3);
+          this.enterRecover(rt, 0.44);
+        }
+        break;
+      }
+
+      case 'macaron_rose_spiral': {
+        // Gentle orbital drift while firing rose pastel spirals
+        const dx = ctx.player.x - enemy.x;
+        const dy = ctx.player.y - enemy.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        const nx = dx / dist;
+        const ny = dy / dist;
+        enemy.vx = -ny * enemy.speed * 0.55 * rt.orbitDir;
+        enemy.vy = nx * enemy.speed * 0.55 * rt.orbitDir;
+        enemy.walkTime += dt;
+
+        const isSolo = (ctx.playerCount ?? 1) <= 1;
+        rt.data.tickTimer -= dt;
+        const interval = isSolo
+          ? Math.max(0.15, 0.21 - rt.cycle * 0.01)
+          : Math.max(0.11, 0.155 - rt.cycle * 0.01);
+        if (rt.data.tickTimer <= 0) {
+          rt.data.tickTimer = interval;
+          const arms = (isSolo ? 3 : 5) + (rt.enraged ? 1 : 0);
+          const angle = rt.data.baseAngle + rt.data.stepCount * 0.36 * rt.data.rotDir;
+          rt.data.stepCount++;
+          const spd = (isSolo ? 162 : 184) + rt.cycle * 12;
+          const color = rt.data.stepCount % 2 === 0 ? PALETTE.rose : PALETTE.coralLight;
+          this.fireRadialOrbs(enemy.x, enemy.y, arms, angle, spd, dmg, 7, 3.2, color, ctx);
+        }
+
+        if (progress >= 1) {
+          this.enterRecover(rt, 0.48);
+        }
+        break;
+      }
+
+      case 'macaron_tether_surge': {
+        // Slow orbit while maintaining the active pastel laser tether between Mint and Rose
+        const partner = enemy.linkedBossId ? ctx.getEnemyById?.(enemy.linkedBossId) : undefined;
+        if (!partner || !partner.alive) {
+          this.enterRecover(rt, 0.35);
+          break;
+        }
+
+        const dx = ctx.player.x - enemy.x;
+        const dy = ctx.player.y - enemy.y;
+        const dist = Math.hypot(dx, dy) || 1;
+        enemy.vx = (-dy / dist) * enemy.speed * 0.4 * rt.orbitDir;
+        enemy.vy = (dx / dist) * enemy.speed * 0.4 * rt.orbitDir;
+        rt.data.targetX = partner.x;
+        rt.data.targetY = partner.y;
+
+        // Check tether segment against ALL alive players
+        const players = ctx.allAlivePlayers ?? [{ id: 'local', ...ctx.player }];
+        for (let i = 0; i < players.length; i++) {
+          const pl = players[i];
+          const hitR = rt.data.tetherHalfWidth + pl.radius * 0.65;
+          const dSq = distPointToSegmentSq(
+            pl.x,
+            pl.y,
+            partner.x,
+            partner.y,
+            enemy.x,
+            enemy.y
+          );
+          if (dSq <= hitR * hitR) {
+            if (ctx.damagePlayerById) ctx.damagePlayerById(pl.id, dmg);
+            else ctx.damagePlayer(dmg);
+          }
+        }
+
+        rt.data.tickTimer -= dt;
+        if (rt.data.tickTimer <= 0) {
+          rt.data.tickTimer = 0.25;
+          const remainingMs = Math.max(0, Math.round((rt.stateDuration - rt.stateElapsed) * 1000));
+          if (remainingMs > 0) {
+            ctx.onHazard?.({
+              hazardKind: 'tether_beam',
+              x: partner.x,
+              y: partner.y,
+              targetX: enemy.x,
+              targetY: enemy.y,
+              radius: rt.data.tetherHalfWidth,
+              durationMs: remainingMs,
+              active: true,
+            });
+          }
+        }
+
+        if (progress >= 1) {
+          this.enterRecover(rt, 0.55);
+        }
+        break;
+      }
+
+      // ---- COUNTESS TIRAMISU ----
+      case 'tiramisu_arena_ring': {
+        enemy.vx = 0;
+        enemy.vy = 0;
+        if (progress >= 1) {
+          this.enterRecover(rt, 0.45);
+        }
+        break;
+      }
+
+      case 'tiramisu_meteor_marks': {
+        enemy.vx = 0;
+        enemy.vy = 0;
+        const players = ctx.allAlivePlayers ?? [{ id: 'local', ...ctx.player }];
+        let allImpacted = true;
+
+        for (let i = 0; i < rt.data.meteors.length; i++) {
+          const m = rt.data.meteors[i];
+          if (m.impacted) continue;
+          allImpacted = false;
+          m.elapsed += dt;
+
+          if (!m.locked) {
+            // Track target player briefly so teammates must spread apart
+            if (m.targetPlayerId) {
+              const targetPl = players.find((pl) => pl.id === m.targetPlayerId);
+              if (targetPl) {
+                m.x = targetPl.x;
+                m.y = targetPl.y;
+              }
+            }
+            if (m.elapsed >= m.trackDuration) {
+              m.locked = true;
+              m.elapsed = 0;
+              ctx.onHazard?.({
+                hazardKind: 'meteor_mark',
+                x: m.x,
+                y: m.y,
+                targetX: 0,
+                targetY: 0,
+                radius: m.radius,
+                durationMs: Math.round(m.lockDuration * 1000),
+                active: true,
+              });
+            }
+          } else if (m.elapsed >= m.lockDuration) {
+            m.impacted = true;
+            // Detonate pastel meteor circle
+            for (let pi = 0; pi < players.length; pi++) {
+              const pl = players[pi];
+              const d = Math.hypot(pl.x - m.x, pl.y - m.y);
+              if (d <= m.radius + pl.radius * 0.5) {
+                if (ctx.damagePlayerById) ctx.damagePlayerById(pl.id, dmg);
+                else ctx.damagePlayer(dmg);
+              }
+            }
+            ctx.spawnRingParticle(m.x, m.y, PALETTE.coral, m.radius + 14, 0.42);
+            ctx.spawnParticles(m.x, m.y, PALETTE.peach, 20, {
+              speedMin: 65,
+              speedMax: 210,
+              sizeMin: 4,
+              sizeMax: 7,
+            });
+            ctx.addScreenShake(5.5, 0.24);
+          }
+        }
+
+        if (allImpacted || progress >= 1) {
+          this.enterRecover(rt, 0.6);
+        }
+        break;
+      }
+
+      case 'tiramisu_cone_volley': {
+        enemy.vx = 0;
+        enemy.vy = 0;
+        rt.data.tickTimer -= dt;
+        if (rt.data.tickTimer <= 0 && rt.data.stepCount < 3) {
+          rt.data.tickTimer = 0.32;
+          const wave = rt.data.stepCount;
+          rt.data.stepCount++;
+          const sweepOffset = (wave - 1) * 0.24;
+          const orbCount = (ctx.playerCount ?? 1) <= 1 ? 5 : 7;
+          const spread = rt.data.coneSpread;
+          const spd = 195 + rt.cycle * 14;
+          const color = wave % 2 === 0 ? PALETTE.peach : PALETTE.butter;
+
+          for (let i = 0; i < orbCount; i++) {
+            const frac = orbCount > 1 ? i / (orbCount - 1) - 0.5 : 0;
+            const a = rt.data.baseAngle + sweepOffset + frac * spread;
+            ctx.spawnEnemyProjectile({
+              x: enemy.x,
+              y: enemy.y,
+              vx: Math.cos(a) * spd,
+              vy: Math.sin(a) * spd,
+              radius: 7,
+              damage: dmg,
+              maxLife: 3.1,
+              color,
+            });
+          }
+          ctx.spawnRingParticle(enemy.x, enemy.y, color, 68, 0.24);
+        }
+
+        if (progress >= 1) {
+          // Generous vulnerable recovery window after sweeping cone volley
+          this.enterRecover(rt, 1.15);
         }
         break;
       }

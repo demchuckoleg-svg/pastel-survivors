@@ -25,7 +25,13 @@ import type {
 export function buildComputedStats(player: Pick<
   PlayerState,
   'heroId' | 'globalPassives' | 'ownedArtifacts' | 'retributionBuffTimer'
->): ComputedPlayerStats {
+> &
+  Partial<
+    Pick<
+      PlayerState,
+      'hasteBuffTimer' | 'starlightBuffTimer' | 'sharedCdAuraTimer' | 'totemRegenTimer'
+    >
+  >): ComputedPlayerStats {
   const base = CLASSES[player.heroId].baseStats;
   let maxHpFlat = 0;
   let moveSpeedMult = 0;
@@ -61,17 +67,26 @@ export function buildComputedStats(player: Pick<
   }
 
   const retributionBonus = player.retributionBuffTimer > 0 ? 0.25 : 0;
+  const hasteMoveBonus = (player.hasteBuffTimer ?? 0) > 0 ? 0.22 : 0;
+  const hasteCdBonus = (player.hasteBuffTimer ?? 0) > 0 ? 0.16 : 0;
+  const starlightCritBonus = (player.starlightBuffTimer ?? 0) > 0 ? 0.15 : 0;
+  const starlightCdBonus = (player.starlightBuffTimer ?? 0) > 0 ? 0.12 : 0;
+  const sharedCdBonus = (player.sharedCdAuraTimer ?? 0) > 0 ? 0.12 : 0;
+  const totemRegenBonus = (player.totemRegenTimer ?? 0) > 0 ? 2.5 : 0;
 
   return {
     maxHp: Math.round(base.maxHp + maxHpFlat),
-    moveSpeed: base.moveSpeed * (1 + moveSpeedMult),
+    moveSpeed: base.moveSpeed * (1 + moveSpeedMult + hasteMoveBonus),
     pickupRadius: base.pickupRadius * (1 + pickupRadiusMult),
     armor: Math.min(0.75, base.armor + armorBonus),
-    critChance: Math.min(0.95, base.critChance + critChanceBonus),
+    critChance: Math.min(0.95, base.critChance + critChanceBonus + starlightCritBonus),
     critMultiplier: base.critMultiplier + critMultBonus,
-    hpRegen: base.hpRegen + hpRegenBonus,
+    hpRegen: base.hpRegen + hpRegenBonus + totemRegenBonus,
     damageMult: 1 + damageMultBonus + retributionBonus,
-    cooldownMult: Math.max(0.25, 1 - cooldownReduction),
+    cooldownMult: Math.max(
+      0.25,
+      1 - (cooldownReduction + hasteCdBonus + starlightCdBonus + sharedCdBonus)
+    ),
     areaMult: 1 + areaMultBonus,
     xpGainMult: 1 + xpGainMultBonus,
     knockbackMult: 1 + knockbackMultBonus,
@@ -79,6 +94,9 @@ export function buildComputedStats(player: Pick<
     pierceBonus: Math.round(pierceBonus),
     hasDoubleCast: player.ownedArtifacts.includes('aether_chronometer'),
     hasRetributionAegis: player.ownedArtifacts.includes('retribution_aegis'),
+    hasAuraRadiusBoost: player.ownedArtifacts.includes('philosophers_censer'),
+    hasOverhealToShield: player.ownedArtifacts.includes('aether_alembic'),
+    hasSharedCooldownAura: player.ownedArtifacts.includes('chrono_distillate'),
   };
 }
 
@@ -171,6 +189,9 @@ export function formatArtifactShortTag(artifact: ArtifactDef): string {
   if (artifact.specialEffect === 'double_cast_every_5th') return '2x CAST';
   if (artifact.specialEffect === 'retribution_shockwave') return 'SHOCKWAVE';
   if (artifact.specialEffect === 'full_heal_on_pickup') return 'FULL HEAL';
+  if (artifact.specialEffect === 'aura_radius_boost') return '+25% AURA';
+  if (artifact.specialEffect === 'overheal_to_shield') return 'OVERHEAL SHIELD';
+  if (artifact.specialEffect === 'shared_cooldown_aura') return 'TEAM CD AURA';
   return formatGlobalPassiveShortTag(artifact.passive.modifiers);
 }
 

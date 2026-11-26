@@ -729,4 +729,97 @@ runTest('Knight Shield Bash & Bastion Quake 2.5s taunt peel + shared Chilled deb
   assert.equal(dmgUnchilled, 100, 'Control attack against unchilled target should deal 1.0x');
 });
 
-console.log('\nAll 6 co-op simulation test suites passed!');
+// ============================================================================
+// TEST 7: Alchemist Class (Solo & Co-op) + Twin Macarons & Countess Tiramisu
+// ============================================================================
+runTest('Alchemist abilities/synergies/artifacts & Twin Macarons / Countess Tiramisu bosses initialize cleanly', () => {
+  // 1. Solo Alchemist sanity check (healing mist, acid flask armor shred, protective ward shield, synergies)
+  const soloAlch = new GameSimulation(707);
+  soloAlch.startRun('alchemist', { mode: 'solo' });
+  const alch = soloAlch.getPrimaryPlayer();
+  assert.equal(alch.heroId, 'alchemist');
+  assert.equal(alch.activeSlots[0]?.id, 'healing_mist');
+
+  // Test all 10 Alchemist abilities & 5 synergies can be leveled and evolved cleanly
+  alch.activeSlots = [
+    { kind: 'ability', id: 'healing_mist', level: 10, cooldownTimer: 0 },
+    { kind: 'ability', id: 'haste_aura', level: 10, cooldownTimer: 0 },
+    { kind: 'ability', id: 'acid_flask', level: 10, cooldownTimer: 0 },
+    { kind: 'ability', id: 'gravity_potion', level: 10, cooldownTimer: 0 },
+    { kind: 'ability', id: 'protective_ward', level: 5, cooldownTimer: 0 },
+    { kind: 'ability', id: 'revive_totem', level: 5, cooldownTimer: 0 },
+  ];
+  const dummy = soloAlch.spawnEnemy('golem', 50, 0, 5000);
+  for (let i = 0; i < 12; i++) {
+    soloAlch.step(0.05, { [alch.id]: IDLE_INPUT });
+  }
+  assert.ok(alch.shieldHp > 0, 'Protective Ward must grant temporary shield HP to Alchemist in solo');
+  assert.ok(alch.hasteBuffTimer > 0, 'Haste Aura must buff Alchemist in solo');
+  assert.ok(dummy.armorShredTimer > 0, 'Acid Flask must apply corrosive armor shred');
+
+  // Evolve Sanctuary Choir & Caustic Singularity
+  assert.equal(soloAlch.evolveSynergy('sanctuary_choir', alch.id), true, 'Sanctuary Choir should evolve');
+  assert.equal(soloAlch.evolveSynergy('caustic_singularity', alch.id), true, 'Caustic Singularity should evolve');
+
+  // Grant all 3 Alchemist Boss Artifacts
+  soloAlch.grantArtifact('philosophers_censer', alch.id);
+  soloAlch.grantArtifact('aether_alembic', alch.id);
+  soloAlch.grantArtifact('chrono_distillate', alch.id);
+  assert.equal(alch.computedStats.hasAuraRadiusBoost, true);
+  assert.equal(alch.computedStats.hasOverhealToShield, true);
+  assert.equal(alch.computedStats.hasSharedCooldownAura, true);
+
+  // 2. Co-op Revive Totem solo-revive + Twin Macarons Duo Boss + Countess Tiramisu
+  const coopRoom = new CoopRoom({ roomId: 'alch-boss-test', seed: 808 });
+  coopRoom.addPlayer('alch', 'alchemist');
+  coopRoom.addPlayer('ally', 'knight');
+  coopRoom.startMatch();
+
+  const pAlch = coopRoom.sim.getPlayer('alch')!;
+  const pAlly = coopRoom.sim.getPlayer('ally')!;
+  pAlch.x = 0;
+  pAlch.y = 0;
+  pAlly.x = 20;
+  pAlly.y = 0;
+
+  // Deploy Revive Totem near downed ally, then move Alchemist away so totem solo-revives
+  pAlch.activeSlots = [{ kind: 'ability', id: 'revive_totem', level: 1, cooldownTimer: 0 }];
+  pAlly.activeSlots = [];
+  coopRoom.step(0.05);
+  pAlch.x = 500; // step out of revive circle
+  pAlly.hp = 1;
+  coopRoom.sim.damagePlayer(999, 'ally');
+  assert.equal(pAlly.downed, true, 'Ally should be downed');
+  for (let i = 0; i < 10; i++) coopRoom.step(0.1);
+  assert.ok(pAlly.reviveProgressSec > 0, 'Revive Totem must solo-revive downed allies in range');
+
+  // Spawn The Twin Macarons (Duo Boss: Mint & Rose)
+  const mint = coopRoom.sim.spawnBoss('twin_macaron_mint', 1);
+  const activeBosses = coopRoom.sim.getActiveBosses();
+  assert.equal(activeBosses.length, 2, 'Twin Macarons must spawn both Mint and Rose linked');
+  const rose = activeBosses.find((b) => b.bossId === 'twin_macaron_rose')!;
+  assert.ok(rose && mint.linkedBossId === rose.id && rose.linkedBossId === mint.id);
+  const sharedInfo = coopRoom.sim.getActiveBossInfo();
+  assert.equal(sharedInfo?.name, 'The Twin Macarons', 'Shared boss bar should display The Twin Macarons');
+  for (let i = 0; i < 30; i++) coopRoom.step(0.1);
+
+  // Killing one twin enrages the other without dropping the chest yet
+  const chestsBefore = coopRoom.sim.pickups.filter((pk) => pk.kind === 'chest').length;
+  coopRoom.sim.damageEnemy(mint, mint.hp + 9999, { playerId: 'alch' });
+  assert.equal(coopRoom.sim.getBossesDefeated(), 0, 'Defeating only one twin must not complete encounter');
+  assert.equal(
+    coopRoom.sim.pickups.filter((pk) => pk.kind === 'chest').length,
+    chestsBefore,
+    'Chest must not drop until both twins fall'
+  );
+  coopRoom.sim.damageEnemy(rose, rose.hp + 9999, { playerId: 'alch' });
+  assert.equal(coopRoom.sim.getBossesDefeated(), 1, 'Defeating both twins completes encounter');
+
+  // Spawn Countess Tiramisu and step through attacks cleanly
+  const countess = coopRoom.sim.spawnBoss('countess_tiramisu', 3);
+  assert.equal(countess.bossId, 'countess_tiramisu');
+  for (let i = 0; i < 60; i++) coopRoom.step(0.1);
+  assert.ok(countess.alive, 'Countess Tiramisu should step cleanly without runtime errors');
+});
+
+console.log('\nAll 7 co-op simulation test suites passed!');

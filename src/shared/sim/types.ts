@@ -61,6 +61,7 @@ export const EnemyStateFlag = {
   BURNING: 1 << 3,
   TAUNTED: 1 << 4,
   ELITE: 1 << 5,
+  ARMOR_SHRED: 1 << 6,
 } as const;
 
 export interface PlayerInput {
@@ -101,6 +102,9 @@ export interface ComputedPlayerStats {
   pierceBonus: number;
   hasDoubleCast: boolean;
   hasRetributionAegis: boolean;
+  hasAuraRadiusBoost: boolean;
+  hasOverhealToShield: boolean;
+  hasSharedCooldownAura: boolean;
 }
 
 export interface ActiveAbilitySlot {
@@ -167,6 +171,12 @@ export interface PlayerState {
   invulnTimer: number;
   hitFlashTimer: number;
   retributionBuffTimer: number;
+  shieldHp: number;
+  shieldTimer: number;
+  hasteBuffTimer: number;
+  starlightBuffTimer: number;
+  sharedCdAuraTimer: number;
+  totemRegenTimer: number;
   alive: boolean;
 
   // Co-op downed / revive & status flags
@@ -196,6 +206,7 @@ export interface EnemyEntity extends SpatialEntity {
   id: number;
   archetypeId: EnemySpriteId;
   bossId?: BossId;
+  linkedBossId?: number;
   isBoss: boolean;
   isElite: boolean;
   x: number;
@@ -223,6 +234,8 @@ export interface EnemyEntity extends SpatialEntity {
   burnDps: number;
   burnTickTimer: number;
   burnColor: string;
+  armorShredTimer: number;
+  armorShredBonus: number;
   tauntTimer: number;
   tauntTargetId: PlayerId | null;
   stateFlags: number;
@@ -277,6 +290,8 @@ export interface DamageOptions {
   burnDps?: number;
   burnDuration?: number;
   burnColor?: string;
+  armorShredDuration?: number;
+  armorShredBonus?: number;
   tauntDuration?: number;
   tauntTargetId?: PlayerId;
   shatterBonus?: boolean;
@@ -444,6 +459,35 @@ export interface BossSummonSpot {
   y: number;
 }
 
+export type BossHazardKind = 'arena_ring' | 'meteor_mark' | 'tether_beam';
+
+export interface BossMeteorMark {
+  x: number;
+  y: number;
+  radius: number;
+  trackDuration: number;
+  lockDuration: number;
+  elapsed: number;
+  locked: boolean;
+  impacted: boolean;
+  targetPlayerId?: PlayerId;
+}
+
+export interface BossArenaRingState {
+  active: boolean;
+  telegraphing: boolean;
+  centerX: number;
+  centerY: number;
+  radius: number;
+  startRadius: number;
+  minRadius: number;
+  elapsed: number;
+  telegraphDuration: number;
+  activeDuration: number;
+  tickTimer: number;
+  damage: number;
+}
+
 export interface BossAttackData {
   startX: number;
   startY: number;
@@ -466,6 +510,9 @@ export interface BossAttackData {
   secondWaveFired: boolean;
   dashesRemaining: number;
   summonSpots: BossSummonSpot[];
+  meteors: BossMeteorMark[];
+  tetherHalfWidth: number;
+  coneSpread: number;
 }
 
 export interface BossRuntime {
@@ -487,6 +534,7 @@ export interface BossRuntime {
   scaleY: number;
   airborne: boolean;
   orbitDir: number;
+  arenaRing?: BossArenaRingState;
   data: BossAttackData;
 }
 
@@ -525,6 +573,9 @@ export interface ActiveProjectile {
   burnDps?: number;
   burnDuration?: number;
   burnColor?: string;
+  armorShredDuration?: number;
+  armorShredBonus?: number;
+  grantStarlightBuffOnHit?: boolean;
   explosiveFinish?: boolean;
   splinterOnBounce?: boolean;
   retargetOnPierce?: boolean;
@@ -581,6 +632,10 @@ export interface ActiveNova {
   freezeDuration?: number;
   stunDuration?: number;
   tauntDuration?: number;
+  burnDps?: number;
+  burnDuration?: number;
+  burnColor?: string;
+  shatterBonus?: boolean;
   followPlayer: boolean;
   lifestealOnMultiKill?: boolean;
   killsThisCast: number;
@@ -589,7 +644,7 @@ export interface ActiveNova {
 
 export interface ActiveOrbitGroup {
   sourceId: AbilityId | SynergyId;
-  visualKind: 'orb' | 'blade' | 'flail' | 'singularity' | 'greatsword';
+  visualKind: 'orb' | 'blade' | 'flail' | 'singularity' | 'greatsword' | 'ward';
   spriteId?: ProjectileSpriteId;
   color: string;
   count: number;
@@ -605,6 +660,8 @@ export interface ActiveOrbitGroup {
   emitBoltTimer?: number;
   gravityDragRadius?: number;
   cleavePulseTimer?: number;
+  shieldPulseTimer?: number;
+  shieldAmount?: number;
 }
 
 export interface ActiveMeleeArc {
@@ -693,6 +750,53 @@ export interface ActiveGroundTrail {
   facingLeft?: boolean;
 }
 
+export interface ActiveZone {
+  sourceId: AbilityId | SynergyId;
+  visualKind:
+    | 'healing_mist'
+    | 'acid_pool'
+    | 'gravity_vortex'
+    | 'sanctuary_choir'
+    | 'caustic_singularity';
+  x: number;
+  y: number;
+  radius: number;
+  color: string;
+  ringColor: string;
+  damage: number;
+  knockback: number;
+  age: number;
+  maxLife: number;
+  tickTimer: number;
+  tickInterval: number;
+  healPerTick?: number;
+  grantHasteSec?: number;
+  armorShredBonus?: number;
+  armorShredDuration?: number;
+  pullStrength?: number;
+  burnDps?: number;
+  burnDuration?: number;
+}
+
+export interface ActiveTotem {
+  sourceId: 'revive_totem' | 'aegis_lantern';
+  x: number;
+  y: number;
+  radius: number;
+  damage: number;
+  speed: number;
+  pierce: number;
+  knockback: number;
+  color: string;
+  age: number;
+  maxLife: number;
+  pulseTimer: number;
+  fireTimer: number;
+  isAegisLantern: boolean;
+  reviveBoostMult: number;
+  soloReviveRate: number;
+}
+
 export interface AbilityRenderState {
   readonly projectiles: readonly ActiveProjectile[];
   readonly beams: readonly ActiveBeam[];
@@ -703,4 +807,6 @@ export interface AbilityRenderState {
   readonly chains: readonly ActiveChainArc[];
   readonly turrets: readonly ActiveTurret[];
   readonly trails: readonly ActiveGroundTrail[];
+  readonly zones: readonly ActiveZone[];
+  readonly totems: readonly ActiveTotem[];
 }

@@ -59,12 +59,31 @@ export const CLASSES: Record<ClassId, ClassDef> = {
     },
     startingAbilityId: 'greatsword_cleave',
   },
+  alchemist: {
+    id: 'alchemist',
+    name: 'Alchemist',
+    title: 'Pastel Apothecary',
+    description:
+      'Support & debuff brewer sustaining squads with healing mists, shields, armor-shredding flasks, and revive lanterns.',
+    accentColor: PALETTE.butter,
+    baseStats: {
+      maxHp: 105,
+      moveSpeed: 126,
+      pickupRadius: 78,
+      armor: 0.05,
+      critChance: 0.07,
+      critMultiplier: 1.5,
+      hpRegen: 0.4,
+    },
+    startingAbilityId: 'healing_mist',
+  },
 };
 
 export const CLASS_LIST: readonly ClassDef[] = [
   CLASSES.mage,
   CLASSES.ranger,
   CLASSES.knight,
+  CLASSES.alchemist,
 ];
 
 export const MAX_ACTIVE_ABILITY_SLOTS = 6;

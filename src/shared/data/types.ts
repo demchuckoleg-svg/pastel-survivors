@@ -1,6 +1,12 @@
-export type HeroId = 'mage' | 'ranger' | 'knight';
+export type HeroId = 'mage' | 'ranger' | 'knight' | 'alchemist';
 export type EnemySpriteId = 'slime' | 'golem' | 'wisp' | 'minislime';
-export type BossId = 'king_mochi' | 'lady_wisteria' | 'aegis';
+export type BossId =
+  | 'king_mochi'
+  | 'lady_wisteria'
+  | 'aegis'
+  | 'twin_macaron_mint'
+  | 'twin_macaron_rose'
+  | 'countess_tiramisu';
 export type PickupSpriteId = 'xp_small' | 'xp_medium' | 'xp_large' | 'heart' | 'magnet' | 'chest';
 export type ProjectileSpriteId =
   | 'fireball'
@@ -13,6 +19,7 @@ export type ProjectileSpriteId =
   | 'axe'
   | 'hammer'
   | 'spear'
+  | 'vial'
   | 'enemy_orb';
 export type GroundSpriteId =
   | 'tile'
@@ -56,7 +63,18 @@ export type AbilityIconId =
   | 'ground_slam'
   | 'holy_hammer'
   | 'spear_thrust'
-  | 'blade_dash';
+  | 'blade_dash'
+  // Alchemist (10)
+  | 'healing_mist'
+  | 'acid_flask'
+  | 'haste_aura'
+  | 'protective_ward'
+  | 'venom_nova'
+  | 'frost_tonic'
+  | 'bouncing_vial'
+  | 'revive_totem'
+  | 'gravity_potion'
+  | 'starlight_elixir';
 
 export type SynergyIconId =
   // Mage (5)
@@ -76,7 +94,13 @@ export type SynergyIconId =
   | 'bastion_quake'
   | 'reapers_pendulum'
   | 'divine_judgment'
-  | 'valkyrie_blitz';
+  | 'valkyrie_blitz'
+  // Alchemist (5)
+  | 'sanctuary_choir'
+  | 'caustic_singularity'
+  | 'aegis_lantern'
+  | 'plague_glacier'
+  | 'celestial_panacea';
 
 export type ArtifactIconId =
   // Mage (3)
@@ -91,6 +115,10 @@ export type ArtifactIconId =
   | 'valkyrie_crest'
   | 'titans_gauntlet'
   | 'retribution_aegis'
+  // Alchemist (3)
+  | 'philosophers_censer'
+  | 'aether_alembic'
+  | 'chrono_distillate'
   // Fallback (1)
   | 'ascended_relic';
 
@@ -164,7 +192,9 @@ export type AbilityBehaviorType =
   | 'dash'
   | 'turret'
   | 'rain'
-  | 'chain';
+  | 'chain'
+  | 'zone'
+  | 'totem';
 
 export interface AbilityStats {
   damage: number;
@@ -233,7 +263,10 @@ export interface SynergyDef {
 export type ArtifactSpecialEffect =
   | 'double_cast_every_5th'
   | 'retribution_shockwave'
-  | 'full_heal_on_pickup';
+  | 'full_heal_on_pickup'
+  | 'aura_radius_boost'
+  | 'overheal_to_shield'
+  | 'shared_cooldown_aura';
 
 export interface ArtifactDef {
   id: ArtifactId;

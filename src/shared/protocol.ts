@@ -87,6 +87,7 @@ export const BinaryEventType = {
   BOSS_TELEGRAPH: 4,
   PLAYER_DOWNED: 5,
   PLAYER_REVIVED: 6,
+  BOSS_HAZARD: 7,
 } as const;
 
 export const DamageNumberFlag = {
@@ -130,7 +131,7 @@ const SNAPSHOT_SELF_PENDING_OFFSET = 20;
 // DETERMINISTIC ENUM <-> U8 LOOKUP TABLES
 // ============================================================================
 
-export const HERO_IDS: readonly HeroId[] = ['mage', 'ranger', 'knight'] as const;
+export const HERO_IDS: readonly HeroId[] = ['mage', 'ranger', 'knight', 'alchemist'] as const;
 
 export function encodeClassId(heroId: HeroId): number {
   const idx = HERO_IDS.indexOf(heroId);
@@ -151,9 +152,19 @@ export const ENEMY_TYPES: readonly WireEnemyTypeName[] = [
   'king_mochi',
   'lady_wisteria',
   'aegis',
+  'twin_macaron_mint',
+  'twin_macaron_rose',
+  'countess_tiramisu',
 ] as const;
 
-export const BOSS_IDS: readonly BossId[] = ['king_mochi', 'lady_wisteria', 'aegis'] as const;
+export const BOSS_IDS: readonly BossId[] = [
+  'king_mochi',
+  'lady_wisteria',
+  'aegis',
+  'twin_macaron_mint',
+  'twin_macaron_rose',
+  'countess_tiramisu',
+] as const;
 
 export function encodeEnemyType(type: WireEnemyTypeName): number {
   const idx = ENEMY_TYPES.indexOf(type);
@@ -199,6 +210,13 @@ export const BOSS_ATTACK_IDS: readonly string[] = [
   'aegis_lance_charge',
   'aegis_prism_cross',
   'aegis_bastion_nova',
+  'macaron_mint_slam',
+  'macaron_mint_dash',
+  'macaron_rose_spiral',
+  'macaron_tether_surge',
+  'tiramisu_arena_ring',
+  'tiramisu_meteor_marks',
+  'tiramisu_cone_volley',
 ] as const;
 
 export function encodeBossAttackId(attackId: string | null | undefined): number {
@@ -300,6 +318,23 @@ export const ABILITY_AND_SYNERGY_IDS: readonly (AbilityId | SynergyId)[] = [
   'reapers_pendulum',
   'divine_judgment',
   'valkyrie_blitz',
+  // Alchemist abilities (45..54)
+  'healing_mist',
+  'acid_flask',
+  'haste_aura',
+  'protective_ward',
+  'venom_nova',
+  'frost_tonic',
+  'bouncing_vial',
+  'revive_totem',
+  'gravity_potion',
+  'starlight_elixir',
+  // Alchemist synergies (55..59)
+  'sanctuary_choir',
+  'caustic_singularity',
+  'aegis_lantern',
+  'plague_glacier',
+  'celestial_panacea',
 ] as const;
 
 const ABILITY_TO_CODE = new Map<string, number>(
@@ -472,6 +507,17 @@ export type BinaryCombatEvent =
       y: number;
       /** Bitmask of reviving player slot IDs (`1 << (slotId - 1)`). */
       reviverMask: number;
+    }
+  | {
+      type: 'BossHazard';
+      hazardKind: 'arena_ring' | 'meteor_mark' | 'tether_beam';
+      x: number;
+      y: number;
+      targetX: number;
+      targetY: number;
+      radius: number;
+      durationMs: number;
+      active: boolean;
     };
 
 export interface MatchSummaryPlayer {
@@ -1114,6 +1160,8 @@ function getBinaryEventByteSize(ev: BinaryCombatEvent): number {
       return 6;
     case 'PlayerRevived':
       return 9;
+    case 'BossHazard':
+      return 14;
   }
 }
 
@@ -1248,6 +1296,28 @@ export function encodeBinaryEvents(
         offset += 2;
         view.setUint8(offset, ev.reviverMask & 0xff);
         offset += 1;
+        break;
+      }
+
+      case 'BossHazard': {
+        view.setUint8(offset, BinaryEventType.BOSS_HAZARD);
+        offset += 1;
+        const kindCode =
+          ev.hazardKind === 'arena_ring' ? 0 : ev.hazardKind === 'meteor_mark' ? 1 : 2;
+        view.setUint8(offset, (kindCode & 0x03) | (ev.active ? 0x04 : 0));
+        offset += 1;
+        view.setInt16(offset, clampI16(ev.x), true);
+        offset += 2;
+        view.setInt16(offset, clampI16(ev.y), true);
+        offset += 2;
+        view.setInt16(offset, clampI16(ev.targetX), true);
+        offset += 2;
+        view.setInt16(offset, clampI16(ev.targetY), true);
+        offset += 2;
+        view.setUint16(offset, clampU16(ev.radius), true);
+        offset += 2;
+        view.setUint16(offset, clampU16(ev.durationMs), true);
+        offset += 2;
         break;
       }
     }
@@ -1414,6 +1484,39 @@ export function decodeBinaryEvents(input: ArrayBuffer | Uint8Array): BinaryComba
         break;
       }
 
+      case BinaryEventType.BOSS_HAZARD: {
+        const meta = view.getUint8(offset);
+        offset += 1;
+        const kindCode = meta & 0x03;
+        const hazardKind: 'arena_ring' | 'meteor_mark' | 'tether_beam' =
+          kindCode === 0 ? 'arena_ring' : kindCode === 1 ? 'meteor_mark' : 'tether_beam';
+        const active = (meta & 0x04) !== 0;
+        const x = view.getInt16(offset, true);
+        offset += 2;
+        const y = view.getInt16(offset, true);
+        offset += 2;
+        const targetX = view.getInt16(offset, true);
+        offset += 2;
+        const targetY = view.getInt16(offset, true);
+        offset += 2;
+        const radius = view.getUint16(offset, true);
+        offset += 2;
+        const durationMs = view.getUint16(offset, true);
+        offset += 2;
+        out.push({
+          type: 'BossHazard',
+          hazardKind,
+          x,
+          y,
+          targetX,
+          targetY,
+          radius,
+          durationMs,
+          active,
+        });
+        break;
+      }
+
       default:
         throw new Error(`Unknown binary event type: ${subType}`);
     }
@@ -1515,7 +1618,7 @@ export function peekBinaryOpcode(input: ArrayBuffer | Uint8Array): number | null
 // ============================================================================
 
 export function isValidHeroId(value: unknown): value is HeroId {
-  return value === 'mage' || value === 'ranger' || value === 'knight';
+  return value === 'mage' || value === 'ranger' || value === 'knight' || value === 'alchemist';
 }
 
 export function isValidPaceMode(value: unknown): value is RoomPaceMode {

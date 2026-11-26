@@ -175,6 +175,7 @@ export class UIManager {
       mage: this.game.sprites.heroes.mage[0].toDataURL(),
       ranger: this.game.sprites.heroes.ranger[0].toDataURL(),
       knight: this.game.sprites.heroes.knight[0].toDataURL(),
+      alchemist: this.game.sprites.heroes.alchemist[0].toDataURL(),
     };
 
     this.root.innerHTML = '';
@@ -2463,7 +2464,9 @@ export class UIManager {
           </h3>
           <div class="debug-buttons">
             <button type="button" class="px-btn px-btn-peach" data-debug-boss="king_mochi">Spawn King Mochi</button>
+            <button type="button" class="px-btn px-btn-mint" data-debug-boss="twin_macaron_mint">Spawn Twin Macarons</button>
             <button type="button" class="px-btn px-btn-lavender" data-debug-boss="lady_wisteria">Spawn Lady Wisteria</button>
+            <button type="button" class="px-btn px-btn-peach" data-debug-boss="countess_tiramisu">Spawn Countess Tiramisu</button>
             <button type="button" class="px-btn px-btn-blue" data-debug-boss="aegis">Spawn Aegis</button>
             <button type="button" class="px-btn px-btn-butter" data-debug-levels="5">+5 Levels</button>
           </div>

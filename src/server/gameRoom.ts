@@ -804,13 +804,17 @@ export class GameRoom {
     if (bossEntity && bossEntity.bossId) {
       const runtime = this.sim.bossAI.getRuntime(bossEntity.id);
       const visual = this.sim.bossAI.getVisualState(bossEntity.id);
+      const combinedInfo = this.sim.getActiveBossInfo();
+      const hpPct = combinedInfo
+        ? toPct(combinedInfo.hp, combinedInfo.maxHp)
+        : toPct(bossEntity.hp, bossEntity.maxHp);
       wireBoss = {
         enemyId: bossEntity.id,
         bossId: bossEntity.bossId,
         phase: runtime?.state ?? 'chase',
         enraged: runtime?.enraged ?? visual.enraged,
         attackId: runtime?.currentAttack?.id ?? null,
-        hpPct: toPct(bossEntity.hp, bossEntity.maxHp),
+        hpPct,
         telegraphPct: Math.round(visual.telegraphRatio * 100),
         cycle: runtime?.cycle ?? 0,
         encounterIndex: runtime?.encounterIndex ?? bossEntity.bossEncounterIndex ?? 0,
@@ -961,6 +965,21 @@ export class GameRoom {
             targetX: ev.targetX,
             targetY: ev.targetY,
             telegraphMs: Math.round(ev.telegraphSec * 1000),
+          });
+          break;
+        }
+
+        case 'BossHazard': {
+          this.binaryEventsBuf.push({
+            type: 'BossHazard',
+            hazardKind: ev.hazardKind,
+            x: ev.x,
+            y: ev.y,
+            targetX: ev.targetX,
+            targetY: ev.targetY,
+            radius: ev.radius,
+            durationMs: ev.durationMs,
+            active: ev.active,
           });
           break;
         }

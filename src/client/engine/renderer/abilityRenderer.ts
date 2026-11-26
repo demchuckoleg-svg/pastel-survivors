@@ -174,6 +174,116 @@ export class AbilityRenderer {
       ctx2d.fillStyle = t.isArtillery ? PALETTE.mint : PALETTE.butter;
       ctx2d.fillRect(bx, by, Math.round(bw * lifeRatio), 3);
     }
+
+    // 5. Lingering Alchemist Zones (Healing Mist, Acid Pool, Gravity Vortex, Sanctuary Choir, Caustic Singularity)
+    for (let i = 0; i < state.zones.length; i++) {
+      const z = state.zones[i];
+      const pos = worldToScreen(z.x, z.y);
+      const fadeIn = Math.min(1, z.age / 0.2);
+      const fadeOut = Math.min(1, (z.maxLife - z.age) / 0.35);
+      const alpha = Math.max(0, Math.min(fadeIn, fadeOut));
+      const pulse = 1 + Math.sin(z.age * 5.2 + i) * 0.04;
+      const r = z.radius * pulse;
+
+      ctx2d.save();
+      // Soft pastel cloud / pool body
+      ctx2d.globalAlpha = alpha * (z.visualKind === 'healing_mist' || z.visualKind === 'sanctuary_choir' ? 0.24 : 0.28);
+      ctx2d.fillStyle = z.color;
+      ctx2d.beginPath();
+      ctx2d.arc(pos.x, pos.y, r, 0, Math.PI * 2);
+      ctx2d.fill();
+
+      // Inner swirling or bubbling ring
+      if (z.visualKind === 'gravity_vortex' || z.visualKind === 'caustic_singularity') {
+        ctx2d.globalAlpha = alpha * 0.65;
+        ctx2d.strokeStyle = z.ringColor;
+        ctx2d.lineWidth = 2.5;
+        const spin = z.age * 3.8;
+        ctx2d.beginPath();
+        ctx2d.arc(pos.x, pos.y, r * 0.62, spin, spin + Math.PI * 1.25);
+        ctx2d.stroke();
+        ctx2d.beginPath();
+        ctx2d.arc(pos.x, pos.y, r * 0.32, -spin * 1.4, -spin * 1.4 + Math.PI * 1.25);
+        ctx2d.stroke();
+      } else {
+        ctx2d.globalAlpha = alpha * 0.45;
+        ctx2d.fillStyle = z.ringColor;
+        ctx2d.beginPath();
+        ctx2d.arc(pos.x, pos.y, r * 0.55, 0, Math.PI * 2);
+        ctx2d.fill();
+      }
+
+      // Crisp pastel dashed boundary
+      ctx2d.globalAlpha = alpha * 0.82;
+      ctx2d.strokeStyle = z.ringColor;
+      ctx2d.lineWidth = 2.5;
+      ctx2d.setLineDash([7, 5]);
+      ctx2d.beginPath();
+      ctx2d.arc(pos.x, pos.y, r, 0, Math.PI * 2);
+      ctx2d.stroke();
+      ctx2d.setLineDash([]);
+      ctx2d.restore();
+    }
+
+    // 6. Deployed Alchemist Totems (Revive Totem & Aegis Lantern)
+    for (let i = 0; i < state.totems.length; i++) {
+      const t = state.totems[i];
+      const pos = worldToScreen(t.x, t.y);
+      const lifeRatio = Math.max(0, 1 - t.age / t.maxLife);
+      const pulse = 1 + Math.sin(t.age * 4.5) * 0.04;
+
+      ctx2d.save();
+      // Support / Revive aura ring
+      ctx2d.globalAlpha = 0.14;
+      ctx2d.fillStyle = t.isAegisLantern ? PALETTE.butter : PALETTE.mintLight;
+      ctx2d.beginPath();
+      ctx2d.arc(pos.x, pos.y, t.radius * pulse, 0, Math.PI * 2);
+      ctx2d.fill();
+
+      ctx2d.globalAlpha = 0.72;
+      ctx2d.strokeStyle = t.isAegisLantern ? PALETTE.butter : PALETTE.mint;
+      ctx2d.lineWidth = 2;
+      ctx2d.setLineDash([6, 4]);
+      ctx2d.beginPath();
+      ctx2d.arc(pos.x, pos.y, t.radius * pulse, 0, Math.PI * 2);
+      ctx2d.stroke();
+      ctx2d.setLineDash([]);
+
+      // Shadow
+      ctx2d.globalAlpha = 1;
+      ctx2d.fillStyle = PALETTE.shadow;
+      ctx2d.beginPath();
+      ctx2d.ellipse(pos.x, pos.y + 12, 11, 4.5, 0, 0, Math.PI * 2);
+      ctx2d.fill();
+
+      // Pastel Lantern body
+      ctx2d.fillStyle = t.isAegisLantern ? PALETTE.butter : PALETTE.mint;
+      ctx2d.strokeStyle = PALETTE.outline;
+      ctx2d.lineWidth = 2;
+      ctx2d.fillRect(pos.x - 7, pos.y - 10, 14, 18);
+      ctx2d.strokeRect(pos.x - 7, pos.y - 10, 14, 18);
+
+      // Glowing core
+      ctx2d.fillStyle = PALETTE.white;
+      ctx2d.fillRect(pos.x - 3, pos.y - 6, 6, 10);
+
+      // Lantern cap
+      ctx2d.fillStyle = PALETTE.butterDark;
+      ctx2d.fillRect(pos.x - 9, pos.y - 13, 18, 4);
+      ctx2d.strokeRect(pos.x - 9, pos.y - 13, 18, 4);
+
+      // Lifetime bar
+      const bw = 24;
+      const bx = Math.round(pos.x - bw / 2);
+      const by = Math.round(pos.y + 15);
+      ctx2d.fillStyle = PALETTE.outline;
+      ctx2d.fillRect(bx - 1, by - 1, bw + 2, 5);
+      ctx2d.fillStyle = PALETTE.creamDark;
+      ctx2d.fillRect(bx, by, bw, 3);
+      ctx2d.fillStyle = t.isAegisLantern ? PALETTE.butter : PALETTE.mint;
+      ctx2d.fillRect(bx, by, Math.round(bw * lifeRatio), 3);
+      ctx2d.restore();
+    }
   }
 
   /**
@@ -367,6 +477,25 @@ export class AbilityRenderer {
           // Highlight streak
           ctx2d.fillStyle = PALETTE.cream;
           ctx2d.fillRect(-len * 0.2, -1.5, len * 0.65, 3);
+        } else if (orb.visualKind === 'ward') {
+          // Protective Ward pastel barrier diamond
+          ctx2d.fillStyle = 'rgba(252, 244, 210, 0.35)';
+          ctx2d.beginPath();
+          ctx2d.arc(pos.x, pos.y, orb.itemRadius * 1.15, 0, Math.PI * 2);
+          ctx2d.fill();
+
+          ctx2d.fillStyle = PALETTE.butterLight;
+          ctx2d.strokeStyle = PALETTE.outline;
+          ctx2d.lineWidth = 2;
+          ctx2d.beginPath();
+          ctx2d.arc(pos.x, pos.y, orb.itemRadius * 0.72, 0, Math.PI * 2);
+          ctx2d.fill();
+          ctx2d.stroke();
+
+          ctx2d.fillStyle = PALETTE.mint;
+          ctx2d.beginPath();
+          ctx2d.arc(pos.x, pos.y, orb.itemRadius * 0.35, 0, Math.PI * 2);
+          ctx2d.fill();
         } else {
           // Arcane Orb or Eclipse Singularity
           if (orb.visualKind === 'singularity') {

@@ -207,9 +207,124 @@ export const BOSSES: Record<BossId, BossDef> = {
       },
     ],
   },
+
+  twin_macaron_mint: {
+    id: 'twin_macaron_mint',
+    name: 'The Twin Macarons',
+    title: 'Mint & Rose Patisserie Duo',
+    spriteId: 'twin_macaron_mint',
+    spawnMinute: 15,
+    baseHp: 1850,
+    baseXp: 230,
+    speed: 74,
+    contactDamage: 24,
+    radius: 30,
+    accentColor: PALETTE.mint,
+    attacks: [
+      {
+        id: 'macaron_mint_slam',
+        name: 'Mint Crumb Slam',
+        telegraphSec: 0.85,
+        cooldownSec: 4.4,
+        damage: 28,
+        description:
+          'Telegraphs a mint impact ring around the closest hero before slamming down.',
+      },
+      {
+        id: 'macaron_mint_dash',
+        name: 'Frosting Dash',
+        telegraphSec: 0.72,
+        cooldownSec: 4.8,
+        damage: 26,
+        description: 'Charges aggressively down a telegraphed lane toward the nearest hero.',
+      },
+    ],
+  },
+
+  twin_macaron_rose: {
+    id: 'twin_macaron_rose',
+    name: 'Rose Macaron',
+    title: 'Mint & Rose Patisserie Duo',
+    spriteId: 'twin_macaron_rose',
+    spawnMinute: 15,
+    baseHp: 1850,
+    baseXp: 230,
+    speed: 70,
+    contactDamage: 20,
+    radius: 30,
+    accentColor: PALETTE.rose,
+    attacks: [
+      {
+        id: 'macaron_rose_spiral',
+        name: 'Rose Petal Spiral',
+        telegraphSec: 0.75,
+        cooldownSec: 4.2,
+        damage: 20,
+        description: 'Orbits at range firing spiral volleys of pastel rose projectiles.',
+      },
+      {
+        id: 'macaron_tether_surge',
+        name: 'Glaze Laser Tether',
+        telegraphSec: 1.1,
+        cooldownSec: 5.8,
+        damage: 30,
+        description:
+          'Charges and ignites a damaging pastel laser tether connecting Mint & Rose.',
+      },
+    ],
+  },
+
+  countess_tiramisu: {
+    id: 'countess_tiramisu',
+    name: 'Countess Tiramisu',
+    title: 'Matriarch of Velvet Layers',
+    spriteId: 'countess_tiramisu',
+    spawnMinute: 25,
+    baseHp: 2700,
+    baseXp: 310,
+    speed: 66,
+    contactDamage: 28,
+    radius: 34,
+    accentColor: PALETTE.peach,
+    attacks: [
+      {
+        id: 'tiramisu_arena_ring',
+        name: 'Velvet Enclosure',
+        telegraphSec: 1.15,
+        cooldownSec: 11.5,
+        damage: 16,
+        description:
+          'Summons a shrinking pastel arena ring; heroes outside take ticking zone damage.',
+      },
+      {
+        id: 'tiramisu_meteor_marks',
+        name: 'Cocoa Starfall',
+        telegraphSec: 0.65,
+        cooldownSec: 5.2,
+        damage: 32,
+        description:
+          'Marks up to 2 random heroes (1 in solo) with delayed pastel meteor circles that lock and detonate.',
+      },
+      {
+        id: 'tiramisu_cone_volley',
+        name: 'Espresso Sweep',
+        telegraphSec: 0.8,
+        cooldownSec: 4.5,
+        damage: 22,
+        description:
+          'Sweeps a wide pastel cone volley before entering a brief vulnerable recovery window.',
+      },
+    ],
+  },
 };
 
-export const BOSS_ORDER: readonly BossId[] = ['king_mochi', 'lady_wisteria', 'aegis'];
+export const BOSS_ORDER: readonly BossId[] = [
+  'king_mochi',
+  'twin_macaron_mint',
+  'lady_wisteria',
+  'countess_tiramisu',
+  'aegis',
+];
 export const BOSS_LIST: readonly BossDef[] = BOSS_ORDER.map((id) => BOSSES[id]);
 export const BOSS_SPAWN_INTERVAL_MIN = 10;
 export const COOP_BOSS_SPAWN_INTERVAL_MIN = 5;

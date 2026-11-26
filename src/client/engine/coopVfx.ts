@@ -83,7 +83,7 @@ interface VisualMeleeArc {
 interface VisualOrbit {
   ownerSlotId: number;
   sourceId: AbilityId | SynergyId;
-  visualKind: 'orb' | 'blade' | 'flail' | 'singularity' | 'greatsword';
+  visualKind: 'orb' | 'blade' | 'flail' | 'singularity' | 'greatsword' | 'ward';
   spriteId?: ProjectileSpriteId;
   color: string;
   count: number;
@@ -149,10 +149,45 @@ interface VisualTrail {
   maxLife: number;
 }
 
+interface VisualZone {
+  ownerSlotId: number;
+  sourceId: AbilityId | SynergyId;
+  x: number;
+  y: number;
+  radius: number;
+  color: string;
+  ringColor: string;
+  isVortex: boolean;
+  age: number;
+  maxLife: number;
+}
+
+interface VisualTotem {
+  ownerSlotId: number;
+  x: number;
+  y: number;
+  radius: number;
+  isAegisLantern: boolean;
+  age: number;
+  maxLife: number;
+}
+
+interface VisualBossHazard {
+  hazardKind: 'arena_ring' | 'meteor_mark' | 'tether_beam';
+  x: number;
+  y: number;
+  targetX: number;
+  targetY: number;
+  radius: number;
+  age: number;
+  maxLife: number;
+  active: boolean;
+}
+
 /**
  * Client-side visual effects engine for Co-op mode.
- * Consumes compact server `AbilityFired` & `BossTelegraph` events to spawn smooth 60 FPS
- * projectiles, AoEs, beams, orbits, chains, and boss telegraphs, dimming teammates'
+ * Consumes compact server `AbilityFired`, `BossTelegraph`, & `BossHazard` events to spawn smooth 60 FPS
+ * projectiles, AoEs, beams, orbits, chains, zones, totems, and boss telegraphs, dimming teammates'
  * attacks to 50% opacity so local attacks and boss telegraphs stay crisp and readable.
  */
 export class CoopVfxSystem {
@@ -165,6 +200,9 @@ export class CoopVfxSystem {
   private readonly chains: VisualChain[] = [];
   private readonly turrets: VisualTurret[] = [];
   private readonly trails: VisualTrail[] = [];
+  private readonly zones: VisualZone[] = [];
+  private readonly totems: VisualTotem[] = [];
+  private readonly bossHazards: VisualBossHazard[] = [];
 
   // Reconstructed BossRuntime for feeding directly into BossRenderer
   private bossRuntime: BossRuntime | null = null;
@@ -183,6 +221,9 @@ export class CoopVfxSystem {
     this.chains.length = 0;
     this.turrets.length = 0;
     this.trails.length = 0;
+    this.zones.length = 0;
+    this.totems.length = 0;
+    this.bossHazards.length = 0;
     this.bossRuntime = null;
     this.lastBossEnemyId = -1;
     this.lastBossPhase = null;
@@ -333,6 +374,9 @@ export class CoopVfxSystem {
         secondWaveFired: false,
         dashesRemaining: 0,
         summonSpots,
+        meteors: [],
+        tetherHalfWidth: boss.radius || 12,
+        coneSpread: 1.05,
       },
     };
 
@@ -343,6 +387,36 @@ export class CoopVfxSystem {
 
   public recordBossTelegraphEvent(ev: Extract<BinaryCombatEvent, { type: 'BossTelegraph' }>): void {
     this.telegraphStartPos.set(ev.enemyId, { x: ev.x, y: ev.y });
+  }
+
+  public recordBossHazardEvent(ev: Extract<BinaryCombatEvent, { type: 'BossHazard' }>): void {
+    const maxLife = Math.max(0.15, ev.durationMs / 1000);
+    if (ev.hazardKind === 'arena_ring' || ev.hazardKind === 'tether_beam') {
+      // Update existing hazard of same kind in-place for smooth shrinking / tracking
+      const existing = this.bossHazards.find((h) => h.hazardKind === ev.hazardKind);
+      if (existing) {
+        existing.x = ev.x;
+        existing.y = ev.y;
+        existing.targetX = ev.targetX;
+        existing.targetY = ev.targetY;
+        existing.radius = ev.radius;
+        existing.active = ev.active;
+        existing.age = 0;
+        existing.maxLife = maxLife;
+        return;
+      }
+    }
+    this.bossHazards.push({
+      hazardKind: ev.hazardKind,
+      x: ev.x,
+      y: ev.y,
+      targetX: ev.targetX,
+      targetY: ev.targetY,
+      radius: ev.radius,
+      age: 0,
+      maxLife,
+      active: ev.active,
+    });
   }
 
   private spawnBossExecuteVisuals(boss: WireBossState, bossEnemy: InterpolatedEnemy): void {
@@ -695,6 +769,58 @@ export class CoopVfxSystem {
         });
         break;
       }
+
+      case 'zone': {
+        const isVortex =
+          ev.abilityId === 'gravity_potion' || ev.abilityId === 'caustic_singularity';
+        const isSelfCentered =
+          ev.abilityId === 'healing_mist' || ev.abilityId === 'sanctuary_choir';
+        const nearby = isSelfCentered
+          ? []
+          : this.findNearestEnemies(originX, originY, enemies, 1, 340);
+        const zx = isSelfCentered
+          ? originX
+          : nearby[0]?.x ?? originX + Math.cos(aimAngle) * 125;
+        const zy = isSelfCentered
+          ? originY
+          : nearby[0]?.y ?? originY + Math.sin(aimAngle) * 125;
+        this.zones.push({
+          ownerSlotId,
+          sourceId: ev.abilityId,
+          x: zx,
+          y: zy,
+          radius: Math.max(56, Math.min(160, stats?.area ?? 84)),
+          color,
+          ringColor:
+            ev.abilityId === 'sanctuary_choir'
+              ? PALETTE.butter
+              : ev.abilityId === 'caustic_singularity'
+              ? PALETTE.lavender
+              : PALETTE.cream,
+          isVortex,
+          age: 0,
+          maxLife: Math.min(5.2, stats?.duration ?? 3.4),
+        });
+        break;
+      }
+
+      case 'totem': {
+        const sameOwner = this.totems.filter((t) => t.ownerSlotId === ownerSlotId);
+        if (sameOwner.length >= 2) {
+          const idx = this.totems.indexOf(sameOwner[0]);
+          if (idx >= 0) this.totems.splice(idx, 1);
+        }
+        this.totems.push({
+          ownerSlotId,
+          x: originX + Math.cos(aimAngle) * 32,
+          y: originY + Math.sin(aimAngle) * 32,
+          radius: Math.max(105, Math.min(185, stats?.area ?? 135)),
+          isAegisLantern: ev.abilityId === 'aegis_lantern',
+          age: 0,
+          maxLife: Math.min(11, stats?.duration ?? 7.5),
+        });
+        break;
+      }
     }
   }
 
@@ -838,6 +964,41 @@ export class CoopVfxSystem {
         this.trails.splice(i, 1);
       }
     }
+
+    // 10. Alchemist Zones
+    for (let i = this.zones.length - 1; i >= 0; i--) {
+      this.zones[i].age += dt;
+      if (this.zones[i].age >= this.zones[i].maxLife) {
+        this.zones.splice(i, 1);
+      }
+    }
+
+    // 11. Alchemist Totems
+    for (let i = this.totems.length - 1; i >= 0; i--) {
+      this.totems[i].age += dt;
+      if (this.totems[i].age >= this.totems[i].maxLife) {
+        this.totems.splice(i, 1);
+      }
+    }
+
+    // 12. Co-op Boss Hazards (arena ring, meteor marks, twin macaron laser tether)
+    const mintTwin = enemies.find((e) => e.type === 'twin_macaron_mint');
+    const roseTwin = enemies.find((e) => e.type === 'twin_macaron_rose');
+    for (let i = this.bossHazards.length - 1; i >= 0; i--) {
+      const h = this.bossHazards[i];
+      h.age += dt;
+      if (h.age >= h.maxLife) {
+        this.bossHazards.splice(i, 1);
+        continue;
+      }
+      // Keep Twin Macarons' tether endpoints locked smoothly to interpolated twin positions!
+      if (h.hazardKind === 'tether_beam' && mintTwin && roseTwin) {
+        h.x = mintTwin.x;
+        h.y = mintTwin.y;
+        h.targetX = roseTwin.x;
+        h.targetY = roseTwin.y;
+      }
+    }
   }
 
   // ==========================================================================
@@ -854,6 +1015,184 @@ export class CoopVfxSystem {
     selfSlotId: number,
     toScreen: WorldToScreenFn
   ): void {
+    // 0. Co-op Boss Hazards (shrinking arena ring, meteor circles, laser tether — always 100% opacity)
+    for (let i = 0; i < this.bossHazards.length; i++) {
+      const h = this.bossHazards[i];
+      const prog = Math.min(1, h.age / Math.max(0.01, h.maxLife));
+      ctx.save();
+      if (h.hazardKind === 'arena_ring') {
+        const s = toScreen(h.x, h.y);
+        const outerR = h.radius + 900;
+        ctx.globalAlpha = h.active ? 0.2 : 0.12 + prog * 0.12;
+        ctx.fillStyle = h.active ? PALETTE.coral : PALETTE.peach;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, outerR, 0, Math.PI * 2);
+        ctx.arc(s.x, s.y, Math.max(10, h.radius), 0, Math.PI * 2, true);
+        ctx.fill('evenodd');
+
+        ctx.globalAlpha = 0.9;
+        ctx.strokeStyle = PALETTE.outline;
+        ctx.lineWidth = h.active ? 5 : 3;
+        if (!h.active) ctx.setLineDash([12, 8]);
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, h.radius, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        if (h.active) {
+          ctx.strokeStyle = PALETTE.peach;
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, h.radius, 0, Math.PI * 2);
+          ctx.stroke();
+        }
+      } else if (h.hazardKind === 'meteor_mark') {
+        const s = toScreen(h.x, h.y);
+        ctx.globalAlpha = 0.2 + prog * 0.22;
+        ctx.fillStyle = PALETTE.coral;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, h.radius, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.globalAlpha = 0.32 + prog * 0.28;
+        ctx.fillStyle = PALETTE.peach;
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, Math.max(4, h.radius * prog), 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.globalAlpha = 0.88;
+        ctx.strokeStyle = PALETTE.outline;
+        ctx.lineWidth = 2.5;
+        ctx.setLineDash([8, 5]);
+        ctx.beginPath();
+        ctx.arc(s.x, s.y, h.radius, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      } else if (h.hazardKind === 'tether_beam') {
+        const s1 = toScreen(h.x, h.y);
+        const s2 = toScreen(h.targetX, h.targetY);
+        ctx.lineCap = 'round';
+        if (!h.active) {
+          ctx.globalAlpha = 0.28 + prog * 0.24;
+          ctx.strokeStyle = PALETTE.rose;
+          ctx.lineWidth = h.radius * 2;
+          ctx.beginPath();
+          ctx.moveTo(s1.x, s1.y);
+          ctx.lineTo(s2.x, s2.y);
+          ctx.stroke();
+
+          ctx.globalAlpha = 0.85;
+          ctx.strokeStyle = PALETTE.outline;
+          ctx.lineWidth = 2.5;
+          ctx.setLineDash([8, 6]);
+          ctx.beginPath();
+          ctx.moveTo(s1.x, s1.y);
+          ctx.lineTo(s2.x, s2.y);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        } else {
+          const fade = prog > 0.88 ? (1 - prog) / 0.12 : 1;
+          const grad = ctx.createLinearGradient(s1.x, s1.y, s2.x, s2.y);
+          grad.addColorStop(0, PALETTE.mint);
+          grad.addColorStop(0.5, PALETTE.cream);
+          grad.addColorStop(1, PALETTE.rose);
+
+          ctx.globalAlpha = 0.82 * fade;
+          ctx.strokeStyle = PALETTE.outline;
+          ctx.lineWidth = (h.radius + 3) * 2;
+          ctx.beginPath();
+          ctx.moveTo(s1.x, s1.y);
+          ctx.lineTo(s2.x, s2.y);
+          ctx.stroke();
+
+          ctx.globalAlpha = 0.94 * fade;
+          ctx.strokeStyle = grad;
+          ctx.lineWidth = h.radius * 2;
+          ctx.beginPath();
+          ctx.moveTo(s1.x, s1.y);
+          ctx.lineTo(s2.x, s2.y);
+          ctx.stroke();
+
+          ctx.strokeStyle = PALETTE.white;
+          ctx.lineWidth = Math.max(2, h.radius * 0.55);
+          ctx.beginPath();
+          ctx.moveTo(s1.x, s1.y);
+          ctx.lineTo(s2.x, s2.y);
+          ctx.stroke();
+        }
+      }
+      ctx.restore();
+    }
+
+    // 0b. Alchemist Zones (with teammate opacity dimming applied!)
+    for (let i = 0; i < this.zones.length; i++) {
+      const z = this.zones[i];
+      const op = this.getOpacityForOwner(z.ownerSlotId, selfSlotId);
+      const pos = toScreen(z.x, z.y);
+      const fadeIn = Math.min(1, z.age / 0.2);
+      const fadeOut = Math.min(1, (z.maxLife - z.age) / 0.35);
+      const alpha = Math.max(0, Math.min(fadeIn, fadeOut)) * op;
+      const r = z.radius * (1 + Math.sin(z.age * 5 + i) * 0.04);
+
+      ctx.save();
+      ctx.globalAlpha = alpha * 0.26;
+      ctx.fillStyle = z.color;
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
+      ctx.fill();
+
+      if (z.isVortex) {
+        ctx.globalAlpha = alpha * 0.65;
+        ctx.strokeStyle = z.ringColor;
+        ctx.lineWidth = 2.5;
+        const spin = z.age * 3.8;
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, r * 0.6, spin, spin + Math.PI * 1.2);
+        ctx.stroke();
+      }
+
+      ctx.globalAlpha = alpha * 0.8;
+      ctx.strokeStyle = z.ringColor;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([7, 5]);
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+
+    // 0c. Alchemist Totems (with teammate opacity dimming applied!)
+    for (let i = 0; i < this.totems.length; i++) {
+      const t = this.totems[i];
+      const op = this.getOpacityForOwner(t.ownerSlotId, selfSlotId);
+      const pos = toScreen(t.x, t.y);
+      ctx.save();
+      ctx.globalAlpha = 0.14 * op;
+      ctx.fillStyle = t.isAegisLantern ? PALETTE.butter : PALETTE.mintLight;
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, t.radius, 0, Math.PI * 2);
+      ctx.fill();
+
+      ctx.globalAlpha = 0.72 * op;
+      ctx.strokeStyle = t.isAegisLantern ? PALETTE.butter : PALETTE.mint;
+      ctx.lineWidth = 2;
+      ctx.setLineDash([6, 4]);
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, t.radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.globalAlpha = op;
+      ctx.fillStyle = t.isAegisLantern ? PALETTE.butter : PALETTE.mint;
+      ctx.strokeStyle = PALETTE.outline;
+      ctx.lineWidth = 2;
+      ctx.fillRect(pos.x - 7, pos.y - 10, 14, 18);
+      ctx.strokeRect(pos.x - 7, pos.y - 10, 14, 18);
+      ctx.fillStyle = PALETTE.white;
+      ctx.fillRect(pos.x - 3, pos.y - 6, 6, 10);
+      ctx.restore();
+    }
+
     // 1. Expanding Novas
     for (let i = 0; i < this.novas.length; i++) {
       const n = this.novas[i];

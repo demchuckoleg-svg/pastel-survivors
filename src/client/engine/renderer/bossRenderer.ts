@@ -1,5 +1,5 @@
 import { PALETTE } from '@shared/data/palette';
-import type { BossRuntime, EnemyEntity } from '@shared/sim/types';
+import type { BossArenaRingState, BossRuntime, EnemyEntity } from '@shared/sim/types';
 
 type WorldToScreenFn = (wx: number, wy: number) => { x: number; y: number };
 
@@ -25,12 +25,42 @@ export class BossRenderer {
       const e = enemies[i];
       if (!e.alive || !e.isBoss) continue;
       const rt = getRuntime(e.id);
-      if (!rt || !rt.currentAttack) continue;
+      if (!rt) continue;
 
+      // Render Countess Tiramisu's persistent shrinking pastel arena ring (telegraphing or active)
+      if (rt.arenaRing && (rt.arenaRing.telegraphing || rt.arenaRing.active)) {
+        this.drawArenaRing(ctx, toScreen, rt.arenaRing);
+      }
+
+      if (!rt.currentAttack) continue;
       const atkId = rt.currentAttack.id;
 
-      // Render King Mochi's landing circle during both telegraph and mid-air leap!
-      if (atkId === 'mochi_leap_slam' && (rt.state === 'telegraph' || rt.state === 'execute')) {
+      // Render Countess Tiramisu's delayed meteor marks during execute (tracking -> locked)
+      if (atkId === 'tiramisu_meteor_marks' && rt.state === 'execute') {
+        for (let mIdx = 0; mIdx < rt.data.meteors.length; mIdx++) {
+          const m = rt.data.meteors[mIdx];
+          if (m.impacted) continue;
+          const total = m.locked ? m.lockDuration : m.trackDuration;
+          const prog = Math.min(1, m.elapsed / Math.max(0.01, total));
+          this.drawCircleTelegraph(
+            ctx,
+            toScreen,
+            m.x,
+            m.y,
+            m.radius,
+            m.locked ? prog : prog * 0.45,
+            m.locked ? PALETTE.coral : PALETTE.peach,
+            m.locked
+          );
+        }
+        continue;
+      }
+
+      // Render King Mochi's & Mint Macaron's landing circle during both telegraph and mid-air leap!
+      if (
+        (atkId === 'mochi_leap_slam' || atkId === 'macaron_mint_slam') &&
+        (rt.state === 'telegraph' || rt.state === 'execute')
+      ) {
         const progress =
           rt.state === 'telegraph'
             ? Math.min(1, rt.stateElapsed / Math.max(0.01, rt.stateDuration))
@@ -42,7 +72,7 @@ export class BossRenderer {
           rt.data.targetY,
           rt.data.radius,
           progress,
-          PALETTE.coral,
+          atkId === 'macaron_mint_slam' ? PALETTE.mint : PALETTE.coral,
           rt.state === 'execute'
         );
         continue;
@@ -165,12 +195,68 @@ export class BossRenderer {
           );
           break;
         }
+
+        case 'macaron_mint_dash': {
+          this.drawLaneTelegraph(
+            ctx,
+            toScreen,
+            rt.data.startX,
+            rt.data.startY,
+            rt.data.baseAngle,
+            rt.data.laneLength,
+            rt.data.halfWidth,
+            progress,
+            PALETTE.mint
+          );
+          break;
+        }
+
+        case 'macaron_rose_spiral': {
+          this.drawRadialBurstTelegraph(
+            ctx,
+            toScreen,
+            e.x,
+            e.y,
+            5,
+            rt.data.baseAngle + progress * 0.8 * rt.data.rotDir,
+            rt.data.radius,
+            progress,
+            PALETTE.rose
+          );
+          break;
+        }
+
+        case 'macaron_tether_surge': {
+          const partner = e.linkedBossId
+            ? enemies.find((other) => other.id === e.linkedBossId && other.alive)
+            : undefined;
+          const px = partner ? partner.x : rt.data.targetX;
+          const py = partner ? partner.y : rt.data.targetY;
+          this.drawTetherTelegraph(ctx, toScreen, px, py, e.x, e.y, rt.data.tetherHalfWidth, progress);
+          break;
+        }
+
+        case 'tiramisu_cone_volley': {
+          this.drawConeTelegraph(
+            ctx,
+            toScreen,
+            e.x,
+            e.y,
+            rt.data.baseAngle,
+            rt.data.coneSpread,
+            240,
+            progress,
+            PALETTE.peach
+          );
+          break;
+        }
       }
     }
   }
 
   /**
-   * Renders active foreground boss effects (ignited Dusk Ray beams, rotating Porcelain Prism beams).
+   * Renders active foreground boss effects (ignited Dusk Ray beams, rotating Porcelain Prism beams,
+   * and Twin Macarons' ignited pastel laser tether).
    */
   public renderForegroundEffects(
     ctx: CanvasRenderingContext2D,
@@ -203,6 +289,25 @@ export class BossRenderer {
           fade,
           rt.stateElapsed
         );
+      } else if (atkId === 'macaron_tether_surge') {
+        const partner = e.linkedBossId
+          ? enemies.find((other) => other.id === e.linkedBossId && other.alive)
+          : undefined;
+        if (partner) {
+          const progress = Math.min(1, rt.stateElapsed / Math.max(0.01, rt.stateDuration));
+          const fade = progress > 0.88 ? (1 - progress) / 0.12 : 1;
+          this.drawActiveTether(
+            ctx,
+            toScreen,
+            partner.x,
+            partner.y,
+            e.x,
+            e.y,
+            rt.data.tetherHalfWidth,
+            fade,
+            rt.stateElapsed
+          );
+        }
       }
     }
   }
@@ -546,6 +651,195 @@ export class BossRenderer {
     ctx.arc(s.x, s.y, hw * 0.55, 0, Math.PI * 2);
     ctx.fill();
 
+    ctx.restore();
+  }
+
+  public drawArenaRing(
+    ctx: CanvasRenderingContext2D,
+    toScreen: WorldToScreenFn,
+    ring: Pick<BossArenaRingState, 'centerX' | 'centerY' | 'radius' | 'telegraphing' | 'active' | 'elapsed' | 'telegraphDuration'>
+  ): void {
+    const s = toScreen(ring.centerX, ring.centerY);
+    const outerR = ring.radius + 900;
+
+    ctx.save();
+    if (ring.active) {
+      // Soft coral danger wash OUTSIDE the safe arena circle using even-odd fill
+      ctx.globalAlpha = 0.2;
+      ctx.fillStyle = PALETTE.coral;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, outerR, 0, Math.PI * 2);
+      ctx.arc(s.x, s.y, Math.max(10, ring.radius), 0, Math.PI * 2, true);
+      ctx.fill('evenodd');
+
+      // Crisp dark-plum + pastel peach arena boundary
+      ctx.globalAlpha = 0.9;
+      ctx.strokeStyle = PALETTE.outline;
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, ring.radius, 0, Math.PI * 2);
+      ctx.stroke();
+
+      ctx.strokeStyle = PALETTE.peach;
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, ring.radius, 0, Math.PI * 2);
+      ctx.stroke();
+    } else if (ring.telegraphing) {
+      const progress = Math.min(1, ring.elapsed / Math.max(0.01, ring.telegraphDuration));
+      ctx.globalAlpha = 0.12 + progress * 0.14;
+      ctx.fillStyle = PALETTE.peach;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, outerR, 0, Math.PI * 2);
+      ctx.arc(s.x, s.y, Math.max(10, ring.radius), 0, Math.PI * 2, true);
+      ctx.fill('evenodd');
+
+      ctx.globalAlpha = 0.85;
+      ctx.strokeStyle = PALETTE.outline;
+      ctx.lineWidth = 3;
+      ctx.setLineDash([12, 8]);
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, ring.radius, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    ctx.restore();
+  }
+
+  public drawTetherTelegraph(
+    ctx: CanvasRenderingContext2D,
+    toScreen: WorldToScreenFn,
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    halfWidth: number,
+    progress: number
+  ): void {
+    const s1 = toScreen(x1, y1);
+    const s2 = toScreen(x2, y2);
+    ctx.save();
+    ctx.lineCap = 'round';
+
+    ctx.globalAlpha = 0.25 + progress * 0.25;
+    ctx.strokeStyle = PALETTE.rose;
+    ctx.lineWidth = halfWidth * 2;
+    ctx.beginPath();
+    ctx.moveTo(s1.x, s1.y);
+    ctx.lineTo(s2.x, s2.y);
+    ctx.stroke();
+
+    ctx.globalAlpha = 0.85;
+    ctx.strokeStyle = PALETTE.outline;
+    ctx.lineWidth = 2.5;
+    ctx.setLineDash([8, 6]);
+    ctx.beginPath();
+    ctx.moveTo(s1.x, s1.y);
+    ctx.lineTo(s2.x, s2.y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.globalAlpha = 0.55 + progress * 0.4;
+    ctx.strokeStyle = PALETTE.cream;
+    ctx.lineWidth = Math.max(2, halfWidth * 0.6 * progress);
+    ctx.beginPath();
+    ctx.moveTo(s1.x, s1.y);
+    ctx.lineTo(s2.x, s2.y);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  public drawActiveTether(
+    ctx: CanvasRenderingContext2D,
+    toScreen: WorldToScreenFn,
+    x1: number,
+    y1: number,
+    x2: number,
+    y2: number,
+    halfWidth: number,
+    fade: number,
+    elapsed: number
+  ): void {
+    const s1 = toScreen(x1, y1);
+    const s2 = toScreen(x2, y2);
+    const pulse = 1 + Math.sin(elapsed * 30) * 0.1;
+    const hw = halfWidth * pulse * fade;
+
+    ctx.save();
+    ctx.lineCap = 'round';
+    const grad = ctx.createLinearGradient(s1.x, s1.y, s2.x, s2.y);
+    grad.addColorStop(0, PALETTE.mint);
+    grad.addColorStop(0.5, PALETTE.cream);
+    grad.addColorStop(1, PALETTE.rose);
+
+    // Outer dark plum outline
+    ctx.globalAlpha = 0.8 * fade;
+    ctx.strokeStyle = PALETTE.outline;
+    ctx.lineWidth = (hw + 3) * 2;
+    ctx.beginPath();
+    ctx.moveTo(s1.x, s1.y);
+    ctx.lineTo(s2.x, s2.y);
+    ctx.stroke();
+
+    // Mint-to-Rose pastel laser body
+    ctx.globalAlpha = 0.94 * fade;
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = hw * 2;
+    ctx.beginPath();
+    ctx.moveTo(s1.x, s1.y);
+    ctx.lineTo(s2.x, s2.y);
+    ctx.stroke();
+
+    // Bright white core
+    ctx.strokeStyle = PALETTE.white;
+    ctx.lineWidth = Math.max(2, hw * 0.55);
+    ctx.beginPath();
+    ctx.moveTo(s1.x, s1.y);
+    ctx.lineTo(s2.x, s2.y);
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  private drawConeTelegraph(
+    ctx: CanvasRenderingContext2D,
+    toScreen: WorldToScreenFn,
+    wx: number,
+    wy: number,
+    angle: number,
+    spread: number,
+    length: number,
+    progress: number,
+    accent: string
+  ): void {
+    const s = toScreen(wx, wy);
+    const half = spread * 0.5;
+    ctx.save();
+    ctx.globalAlpha = 0.16 + progress * 0.18;
+    ctx.fillStyle = accent;
+    ctx.beginPath();
+    ctx.moveTo(s.x, s.y);
+    ctx.arc(s.x, s.y, length, angle - half, angle + half);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.globalAlpha = 0.25 + progress * 0.2;
+    ctx.fillStyle = PALETTE.coral;
+    ctx.beginPath();
+    ctx.moveTo(s.x, s.y);
+    ctx.arc(s.x, s.y, length * progress, angle - half, angle + half);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.globalAlpha = 0.82;
+    ctx.strokeStyle = PALETTE.outline;
+    ctx.lineWidth = 2;
+    ctx.setLineDash([7, 5]);
+    ctx.beginPath();
+    ctx.moveTo(s.x, s.y);
+    ctx.arc(s.x, s.y, length, angle - half, angle + half);
+    ctx.closePath();
+    ctx.stroke();
+    ctx.setLineDash([]);
     ctx.restore();
   }
 }

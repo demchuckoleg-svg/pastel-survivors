@@ -180,7 +180,14 @@ const DECOR_KEYS: readonly GroundSpriteId[] = [
 ];
 
 function isBossWireType(type: WireEnemyTypeName): type is BossId {
-  return type === 'king_mochi' || type === 'lady_wisteria' || type === 'aegis';
+  return (
+    type === 'king_mochi' ||
+    type === 'lady_wisteria' ||
+    type === 'aegis' ||
+    type === 'twin_macaron_mint' ||
+    type === 'twin_macaron_rose' ||
+    type === 'countess_tiramisu'
+  );
 }
 
 function getEnemyAccentColor(type: WireEnemyTypeName): string {
@@ -1027,6 +1034,11 @@ export class GameEngine {
 
         case 'BossTelegraph': {
           this.coopVfx.recordBossTelegraphEvent(ev);
+          break;
+        }
+
+        case 'BossHazard': {
+          this.coopVfx.recordBossHazardEvent(ev);
           break;
         }
 
@@ -1926,6 +1938,8 @@ export class GameEngine {
           burnDps: 0,
           burnTickTimer: 0,
           burnColor: PALETTE.coral,
+          armorShredTimer: 0,
+          armorShredBonus: 0,
           tauntTimer: 0,
           tauntTargetId: null,
           stateFlags: 0,
