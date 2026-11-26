@@ -567,28 +567,32 @@ export class CoopVfxSystem {
 
       case 'beam': {
         const isSpear = ev.abilityId === 'spear_thrust';
-        const count = Math.min(isSpear ? 2 : 4, Math.max(1, stats?.count ?? 1));
-        const width = Math.max(12, Math.min(34, (stats?.area ?? 20) * 0.75));
+        const beamCount = isSpear ? Math.min(2, stats?.count ?? 1) : Math.min(3, stats?.count ?? 1);
+        const width = Math.max(12, Math.min(34, (stats?.area ?? 20) * 0.7));
         const length = isSpear
-          ? 175
+          ? 165
           : ev.abilityId === 'starlight_railgun'
-          ? 1620
+          ? 1689
           : ev.abilityId === 'tempest_lance'
-          ? 1540
+          ? 1542
           : ev.abilityId === 'piercing_rail_bow'
-          ? 1400
-          : 1250;
+          ? 1395
+          : 1248;
         const spreadStep =
-          ev.abilityId === 'tempest_lance'
-            ? 0.24
+          ev.abilityId === 'piercing_rail_bow'
+            ? 0.14
             : ev.abilityId === 'starlight_railgun'
             ? 0.13
-            : ev.abilityId === 'piercing_rail_bow'
-            ? 0.14
-            : 0.18;
-
-        for (let i = 0; i < count; i++) {
-          const offset = count === 1 ? 0 : (i - (count - 1) / 2) * spreadStep;
+            : 0.24;
+        for (let i = 0; i < beamCount; i++) {
+          const offset =
+            beamCount === 1
+              ? 0
+              : beamCount === 2 && ev.abilityId === 'plasma_beam'
+              ? i === 0
+                ? -0.18
+                : 0.18
+              : (i - (beamCount - 1) / 2) * spreadStep;
           this.beams.push({
             ownerSlotId,
             x: originX,
@@ -600,7 +604,7 @@ export class CoopVfxSystem {
             coreColor: PALETTE.white,
             spriteId: isSpear ? 'spear' : undefined,
             age: 0,
-            maxLife: isSpear ? 0.22 : 0.34,
+            maxLife: 0.28,
           });
         }
         break;
