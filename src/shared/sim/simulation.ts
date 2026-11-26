@@ -8,18 +8,22 @@ import {
 import {
   BOSS_SPAWN_INTERVAL_MIN,
   BOSSES,
+  COOP_BOSS_SPAWN_INTERVAL_MIN,
+  COOP_PACE_TIME_SCALE,
   ENEMIES,
-  enemyHP,
-  enemySpawnRate,
-  enemyXP,
   getBossForEncounter,
   pickWaveArchetype,
+  scaledBossHP,
+  scaledEnemyHP,
+  scaledEnemyXP,
+  scaledSpawnRate,
   xpNeeded,
 } from '../data/enemies';
 import { PALETTE } from '../data/palette';
 import { getSynergyDef } from '../data/synergies';
 import type {
   AbilityId,
+  ArtifactDef,
   ArtifactId,
   BossId,
   EnemySpriteId,
@@ -38,32 +42,53 @@ import {
 import type { SimEvent } from './events';
 import {
   buildComputedStats,
+  generateBossArtifactChoicesForPlayer,
   generateLevelUpChoicesForPlayer,
   getAvailableSynergyEvolutionsForPlayer,
+  refreshPendingChoiceBatch,
 } from './progression';
 import { createRng, type RngSource } from './rng';
 import { SpatialHash } from './spatialHash';
-import type {
-  ActiveAbilitySlot,
-  BossActiveInfo,
-  DamageOptions,
-  EnemyEntity,
-  EnemyProjectile,
-  GameState,
-  GlobalPassiveEntry,
-  LevelUpChoice,
-  ParticleBurstOptions,
-  PickupEntity,
-  PlayerId,
-  PlayerInput,
-  PlayerState,
-  RunStatsSnapshot,
+import {
+  EnemyStateFlag,
+  PlayerStateFlag,
+  type ActiveAbilitySlot,
+  type BossActiveInfo,
+  type DamageOptions,
+  type EnemyEntity,
+  type EnemyProjectile,
+  type EnemySnapshot,
+  type GameState,
+  type GlobalPassiveEntry,
+  type LevelUpChoice,
+  type ParticleBurstOptions,
+  type PendingChoiceBatch,
+  type PendingChoiceSource,
+  type PersonalUpgradePayload,
+  type PickupEntity,
+  type PickupSnapshot,
+  type PlayerId,
+  type PlayerInput,
+  type PlayerSnapshot,
+  type PlayerState,
+  type RoomMode,
+  type RoomPaceMode,
+  type RoomSnapshot,
+  type RunStatsSnapshot,
+  type UpgradeChoiceIndex,
 } from './types';
 
 export const DEFAULT_LOCAL_PLAYER_ID: PlayerId = 'local';
 export const MAX_PLAYERS = 4;
-export const MAX_ENEMIES = 320;
-export const MAX_PICKUPS = 320;
+export const MAX_ENEMIES = 350;
+export const MAX_PICKUPS = 400;
+
+export const REVIVE_CIRCLE_RADIUS = 72;
+export const REVIVE_DURATION_SEC = 10.0;
+export const REVIVE_HP_RATIO = 0.2;
+export const BOSS_KILL_REVIVE_HP_RATIO = 0.5;
+export const REVIVE_INVULN_SEC = 2.0;
+export const GHOST_DRIFT_SPEED_MULT = 0.35;
 
 export interface PlayerInitConfig {
   id: PlayerId;
@@ -72,15 +97,25 @@ export interface PlayerInitConfig {
 
 export interface StartRunOptions {
   seed?: number;
+  mode?: RoomMode;
+  paceMode?: RoomPaceMode;
+  /** When true (default in co-op), level-ups & Boss Chests queue asynchronously without pausing the room. */
+  asyncLevelUps?: boolean;
+}
+
+export interface OverflowMultipliers {
+  hpMult: number;
+  xpMult: number;
+  eliteChance: number;
 }
 
 /**
  * Pure headless game simulation for Pastel Survivors.
  *
- * - Supports 1 player (Solo Offline) or up to 4 players (future online Co-op).
+ * - Supports 1 player (Solo Offline) or up to 4 players (Co-op).
  * - Zero browser, DOM, Canvas, or Web Audio dependencies.
  * - Emits lightweight typed `SimEvent` objects every tick for the client
- *   renderer/audio/UI layers to consume.
+ *   renderer/audio/UI layers or authoritative co-op server to consume.
  */
 export class GameSimulation {
   public readonly spatialHash: SpatialHash<EnemyEntity>;
@@ -95,6 +130,10 @@ export class GameSimulation {
 
   private rng: RngSource;
   private state: GameState = 'menu';
+  private mode: RoomMode = 'solo';
+  private paceMode: RoomPaceMode = 'standard';
+  private asyncLevelUps = false;
+  private tickCount = 0;
   private elapsedRunSec = 0;
 
   // Reference viewport / arena dimensions used for wave spawn & recycle rings
@@ -103,7 +142,9 @@ export class GameSimulation {
 
   // Wave director & run counters
   private nextEnemyId = 1;
+  private nextChoiceBatchId = 1;
   private spawnAccumulator = 0;
+  private overflowSpawnPressure = 0;
   private nextBossEncounterIndex = 0;
   private nextSwarmWaveSec = 45;
   private kills = 0;
@@ -111,6 +152,7 @@ export class GameSimulation {
 
   // Reusable buffers
   private readonly sepQueryBuf: EnemyEntity[] = [];
+  private readonly tauntQueryBuf: EnemyEntity[] = [];
   private events: SimEvent[] = [];
 
   constructor(seed?: number) {
@@ -134,8 +176,56 @@ export class GameSimulation {
     this.state = next;
   }
 
+  public getMode(): RoomMode {
+    return this.mode;
+  }
+
+  public getPaceMode(): RoomPaceMode {
+    return this.paceMode;
+  }
+
+  public setPaceMode(paceMode: RoomPaceMode): void {
+    this.paceMode = paceMode;
+  }
+
+  public isAsyncLevelUps(): boolean {
+    return this.asyncLevelUps;
+  }
+
+  public getTickCount(): number {
+    return this.tickCount;
+  }
+
   public getElapsedRunSec(): number {
     return this.elapsedRunSec;
+  }
+
+  public getEffectiveMinutes(): number {
+    const rawMinutes = this.elapsedRunSec / 60;
+    return this.paceMode === 'coop_pace' ? rawMinutes * COOP_PACE_TIME_SCALE : rawMinutes;
+  }
+
+  public getBossSpawnIntervalSec(): number {
+    const intervalMin =
+      this.paceMode === 'coop_pace' ? COOP_BOSS_SPAWN_INTERVAL_MIN : BOSS_SPAWN_INTERVAL_MIN;
+    return intervalMin * 60;
+  }
+
+  public getPlayerCount(): number {
+    return Math.max(1, this.players.size);
+  }
+
+  public getOverflowPressure(): number {
+    return this.overflowSpawnPressure;
+  }
+
+  public getOverflowMultipliers(): OverflowMultipliers {
+    const ratio = Math.min(1, Math.max(0, this.overflowSpawnPressure) / 50);
+    return {
+      hpMult: 1 + ratio * 0.35,
+      xpMult: 1 + ratio * 0.45,
+      eliteChance: ratio * 0.25,
+    };
   }
 
   public getKills(): number {
@@ -178,7 +268,7 @@ export class GameSimulation {
   public getAlivePlayers(): PlayerState[] {
     const alive: PlayerState[] = [];
     for (const p of this.players.values()) {
-      if (p.alive) alive.push(p);
+      if (p.alive && !p.downed) alive.push(p);
     }
     return alive;
   }
@@ -206,7 +296,7 @@ export class GameSimulation {
   }
 
   public getNextBossCountdownSec(): number {
-    const nextSec = (this.nextBossEncounterIndex + 1) * BOSS_SPAWN_INTERVAL_MIN * 60;
+    const nextSec = (this.nextBossEncounterIndex + 1) * this.getBossSpawnIntervalSec();
     return Math.max(0, nextSec - this.elapsedRunSec);
   }
 
@@ -216,9 +306,110 @@ export class GameSimulation {
       elapsedRunSec: this.elapsedRunSec,
       level: p.level,
       xp: p.xp,
-      xpToNext: xpNeeded(p.level),
+      xpToNext: p.xpToNext,
       kills: this.kills,
       bossesDefeated: this.bossesDefeated,
+    };
+  }
+
+  /**
+   * Produces a broadcast-ready authoritative room snapshot for co-op clients,
+   * including per-player `xp`, `xpToNext`, `level`, `revivePct`, `stateFlags`,
+   * `pendingQueueCount`, and shared enemy debuff flags (`chilled`, `tauntTargetId`, `isElite`).
+   */
+  public getRoomSnapshot(): RoomSnapshot {
+    const players: PlayerSnapshot[] = [];
+    for (const p of this.players.values()) {
+      players.push({
+        id: p.id,
+        heroId: p.heroId,
+        x: p.x,
+        y: p.y,
+        vx: p.vx,
+        vy: p.vy,
+        hp: p.hp,
+        maxHp: p.maxHp,
+        xp: p.xp,
+        xpToNext: p.xpToNext,
+        level: p.level,
+        facingLeft: p.facingLeft,
+        aimAngle: p.aimAngle,
+        alive: p.alive,
+        downed: p.downed,
+        revivePct: p.revivePct,
+        invulnTimer: p.invulnTimer,
+        stateFlags: p.stateFlags,
+        pendingQueueCount: p.pendingQueueCount,
+      });
+    }
+
+    const enemies: EnemySnapshot[] = [];
+    for (let i = 0; i < this.enemies.length; i++) {
+      const e = this.enemies[i];
+      if (!e.alive) continue;
+      enemies.push({
+        id: e.id,
+        archetypeId: e.archetypeId,
+        bossId: e.bossId,
+        isBoss: e.isBoss,
+        isElite: e.isElite,
+        x: e.x,
+        y: e.y,
+        hp: e.hp,
+        maxHp: e.maxHp,
+        radius: e.radius,
+        facingLeft: e.facingLeft,
+        chilled: e.chilled,
+        tauntTargetId: e.tauntTargetId,
+        stateFlags: e.stateFlags,
+      });
+    }
+
+    const pickups: PickupSnapshot[] = [];
+    for (let i = 0; i < this.pickups.length; i++) {
+      const item = this.pickups[i];
+      pickups.push({
+        kind: item.kind,
+        x: item.x,
+        y: item.y,
+        value: item.value,
+      });
+    }
+
+    return {
+      tick: this.tickCount,
+      elapsedRunSec: this.elapsedRunSec,
+      mode: this.mode,
+      paceMode: this.paceMode,
+      state: this.state,
+      playerCount: this.players.size,
+      enemyCount: enemies.length,
+      enemyCap: MAX_ENEMIES,
+      overflowPressure: this.overflowSpawnPressure,
+      kills: this.kills,
+      bossesDefeated: this.bossesDefeated,
+      nextBossCountdownSec: this.getNextBossCountdownSec(),
+      players,
+      enemies,
+      pickups,
+      activeBoss: this.getActiveBossInfo(),
+    };
+  }
+
+  /**
+   * Returns the private upgrade draft payload for a specific player if they have
+   * an open choice batch, or `null` if their personal queue is empty.
+   */
+  public getPersonalUpgradePayload(playerId: PlayerId): PersonalUpgradePayload | null {
+    const p = this.players.get(playerId);
+    if (!p || p.pendingChoiceQueue.length === 0) return null;
+    const head = p.pendingChoiceQueue[0];
+    return {
+      playerId: p.id,
+      batchId: head.id,
+      source: head.source,
+      choices: head.choices,
+      pendingQueueCount: p.pendingQueueCount,
     };
   }
 
@@ -261,6 +452,7 @@ export class GameSimulation {
       hp: base.maxHp,
       maxHp: base.maxHp,
       xp: 0,
+      xpToNext: xpNeeded(1),
       level: 1,
       facingLeft: false,
       aimAngle: 0,
@@ -271,6 +463,10 @@ export class GameSimulation {
       hitFlashTimer: 0,
       retributionBuffTimer: 0,
       alive: true,
+      downed: false,
+      reviveProgressSec: 0,
+      revivePct: 0,
+      stateFlags: PlayerStateFlag.NONE,
       activeSlots: [],
       consumedAbilities: new Set<AbilityId>(),
       ownedSynergies: new Set<SynergyId>(),
@@ -296,12 +492,42 @@ export class GameSimulation {
       },
       masteryCount: 0,
       pendingLevelUps: 0,
+      pendingChoiceQueue: [],
+      pendingQueueCount: 0,
       pendingChoices: [],
       pendingArtifactChoices: [],
     };
     this.players.set(id, player);
     this.abilityRunners.set(id, new AbilityRunner());
     return player;
+  }
+
+  /**
+   * Removes a disconnected player from an active room and checks if all
+   * remaining connected players are downed.
+   */
+  public removePlayer(playerId: PlayerId): SimEvent[] {
+    this.players.delete(playerId);
+    this.abilityRunners.delete(playerId);
+
+    // Clear any enemy taunts pointing at the removed player
+    for (let i = 0; i < this.enemies.length; i++) {
+      if (this.enemies[i].tauntTargetId === playerId) {
+        this.enemies[i].tauntTargetId = null;
+        this.enemies[i].tauntTimer = 0;
+        this.syncEnemyStateFlags(this.enemies[i]);
+      }
+    }
+
+    if (this.state === 'playing' && this.players.size > 0 && this.getAlivePlayers().length === 0) {
+      this.state = 'gameover';
+      this.emit({
+        type: 'GameOverTriggered',
+        snapshot: this.getRunStatsSnapshot(),
+      });
+    }
+
+    return this.drainEvents();
   }
 
   // ==========================================================================
@@ -324,13 +550,20 @@ export class GameSimulation {
         ? [{ id: DEFAULT_LOCAL_PLAYER_ID, heroId: config }]
         : config.slice(0, MAX_PLAYERS);
 
+    this.mode = options.mode ?? (roster.length > 1 ? 'coop' : 'solo');
+    this.paceMode = options.paceMode ?? (this.mode === 'coop' ? 'coop_pace' : 'standard');
+    this.asyncLevelUps = options.asyncLevelUps ?? this.mode === 'coop';
+
     this.players.clear();
     this.abilityRunners.clear();
     this.events = [];
 
+    this.tickCount = 0;
     this.elapsedRunSec = 0;
     this.nextEnemyId = 1;
+    this.nextChoiceBatchId = 1;
     this.spawnAccumulator = 0;
+    this.overflowSpawnPressure = 0;
     this.nextBossEncounterIndex = 0;
     this.nextSwarmWaveSec = 45;
     this.kills = 0;
@@ -510,6 +743,31 @@ export class GameSimulation {
 
   public grantArtifact(artifactId: ArtifactId, playerId?: PlayerId): SimEvent[] {
     const p = this.resolvePlayer(playerId);
+    this.applyArtifactInternal(p, artifactId);
+
+    // If the head queued batch is a boss_chest batch, shift it and advance the queue
+    if (p.pendingChoiceQueue.length > 0 && p.pendingChoiceQueue[0].source === 'boss_chest') {
+      const chosen =
+        p.pendingChoiceQueue[0].choices.find((c) => c.artifactId === artifactId) ??
+        p.pendingChoiceQueue[0].choices[0];
+      p.pendingChoiceQueue.shift();
+      this.advanceChoiceQueueAfterPick(p, chosen);
+    } else {
+      p.pendingArtifactChoices = [];
+      if (!this.asyncLevelUps && this.state === 'artifact') {
+        if (p.pendingChoiceQueue.length > 0) {
+          this.openHeadBatchForSolo(p);
+        } else {
+          this.state = 'playing';
+        }
+      }
+      this.syncPlayerChoiceState(p);
+    }
+
+    return this.drainEvents();
+  }
+
+  private applyArtifactInternal(p: PlayerState, artifactId: ArtifactId): void {
     const def = getArtifactDef(artifactId);
     p.ownedArtifacts.push(artifactId);
 
@@ -529,7 +787,7 @@ export class GameSimulation {
     this.recomputeStats(p, true);
 
     const fullHeal = def.specialEffect === 'full_heal_on_pickup';
-    if (fullHeal) {
+    if (fullHeal && !p.downed) {
       p.hp = p.maxHp;
     }
 
@@ -543,19 +801,6 @@ export class GameSimulation {
       y: p.y,
       fullHeal,
     });
-
-    p.pendingArtifactChoices = [];
-
-    if (this.state === 'artifact') {
-      if (p.pendingLevelUps > 0) {
-        p.pendingLevelUps--;
-        this.openNextLevelUp(p);
-      } else {
-        this.state = 'playing';
-      }
-    }
-
-    return this.drainEvents();
   }
 
   public generateLevelUpChoices(count = 3, playerId?: PlayerId): LevelUpChoice[] {
@@ -563,10 +808,46 @@ export class GameSimulation {
     return generateLevelUpChoicesForPlayer(p, this.rng, count);
   }
 
+  /**
+   * Handles a player's `PICK_UPGRADE (0 | 1 | 2)` action against their active
+   * head choice batch (either a personal level-up or a shared Boss Artifact roll).
+   * Applies the upgrade immediately and deals the next queued set of 3 choices if any.
+   */
+  public pickUpgrade(playerId: PlayerId, choiceIndex: UpgradeChoiceIndex): SimEvent[] {
+    const p = this.players.get(playerId);
+    if (!p || p.pendingChoiceQueue.length === 0) {
+      return this.drainEvents();
+    }
+
+    const head = p.pendingChoiceQueue[0];
+    if (choiceIndex < 0 || choiceIndex >= head.choices.length) {
+      return this.drainEvents();
+    }
+
+    const choice = head.choices[choiceIndex];
+    this.applySingleChoiceEffect(p, choice);
+    p.pendingChoiceQueue.shift();
+    this.advanceChoiceQueueAfterPick(p, choice);
+
+    return this.drainEvents();
+  }
+
   public applyLevelUpChoice(choice: LevelUpChoice, playerId?: PlayerId): SimEvent[] {
     const p = this.resolvePlayer(playerId);
+    this.applySingleChoiceEffect(p, choice);
 
-    if (choice.kind === 'synergy' && choice.synergyId) {
+    if (p.pendingChoiceQueue.length > 0) {
+      p.pendingChoiceQueue.shift();
+    }
+    this.advanceChoiceQueueAfterPick(p, choice);
+
+    return this.drainEvents();
+  }
+
+  private applySingleChoiceEffect(p: PlayerState, choice: LevelUpChoice): void {
+    if (choice.kind === 'artifact' && choice.artifactId) {
+      this.applyArtifactInternal(p, choice.artifactId);
+    } else if (choice.kind === 'synergy' && choice.synergyId) {
       this.evolveSynergy(choice.synergyId, p.id);
     } else if (choice.kind === 'ability' && choice.abilityId) {
       this.acquireOrUpgradeAbility(choice.abilityId, p.id);
@@ -585,47 +866,181 @@ export class GameSimulation {
         this.healPlayer(choice.masteryHeal, p.id);
       }
     }
-
-    p.pendingChoices = [];
-    if (p.pendingLevelUps > 0) {
-      p.pendingLevelUps--;
-      this.openNextLevelUp(p);
-    } else if (this.state === 'levelup') {
-      this.state = 'playing';
-    }
-
-    return this.drainEvents();
   }
 
-  public grantLevels(levels = 1, playerId?: PlayerId): SimEvent[] {
-    const p = this.resolvePlayer(playerId);
-    for (let i = 0; i < levels; i++) {
-      p.level += 1;
-      p.pendingLevelUps += 1;
+  private advanceChoiceQueueAfterPick(p: PlayerState, pickedChoice?: LevelUpChoice): void {
+    if (p.pendingChoiceQueue.length > 0) {
+      // Refresh the newly active batch so all 3 choices reflect the player's latest build
+      p.pendingChoiceQueue[0] = refreshPendingChoiceBatch(p, p.pendingChoiceQueue[0], this.rng);
     }
 
-    if (this.state === 'playing' && p.pendingLevelUps > 0) {
-      p.pendingLevelUps--;
-      this.openNextLevelUp(p);
+    this.syncPlayerChoiceState(p);
+
+    if (pickedChoice) {
+      const nextHead = p.pendingChoiceQueue[0];
+      this.emit({
+        type: 'UpgradePicked',
+        playerId: p.id,
+        choice: pickedChoice,
+        remainingQueueCount: p.pendingQueueCount,
+        nextBatchId: nextHead?.id,
+        nextChoices: nextHead ? nextHead.choices : [],
+      });
+    }
+
+    if (!this.asyncLevelUps) {
+      if (p.pendingChoiceQueue.length > 0) {
+        this.openHeadBatchForSolo(p);
+      } else if (this.state === 'levelup' || this.state === 'artifact') {
+        this.state = 'playing';
+      }
+    }
+  }
+
+  private openHeadBatchForSolo(p: PlayerState): void {
+    const head = p.pendingChoiceQueue[0];
+    if (!head) return;
+
+    if (head.source === 'boss_chest') {
+      const artifactDefs: ArtifactDef[] = head.choices
+        .filter((c): c is LevelUpChoice & { artifactId: ArtifactId } => Boolean(c.artifactId))
+        .map((c) => getArtifactDef(c.artifactId));
+      p.pendingArtifactChoices = artifactDefs;
+      this.state = 'artifact';
+      this.emit({
+        type: 'BossChestOpened',
+        playerId: p.id,
+        x: p.x,
+        y: p.y,
+        choices: artifactDefs,
+        upgradeChoices: head.choices,
+        batchId: head.id,
+        pendingQueueCount: p.pendingQueueCount,
+      });
     } else {
+      this.state = 'levelup';
       this.emit({
         type: 'LevelUpTriggered',
         playerId: p.id,
         newLevel: p.level,
         x: p.x,
         y: p.y,
-        choices: [],
+        choices: head.choices,
+        batchId: head.id,
+        pendingQueueCount: p.pendingQueueCount,
       });
     }
+  }
 
+  public grantLevels(levels = 1, playerId?: PlayerId): SimEvent[] {
+    const p = this.resolvePlayer(playerId);
+    for (let i = 0; i < levels; i++) {
+      this.triggerSinglePersonalLevelUp(p);
+    }
     return this.drainEvents();
+  }
+
+  private triggerSinglePersonalLevelUp(player: PlayerState): void {
+    player.level += 1;
+    player.xpToNext = xpNeeded(player.level);
+
+    // Immediately roll 3 valid upgrade choices and push into this player's personal queue.
+    // No automatic knockback pulse — live drafting remains high-tension.
+    const rolled = this.generateLevelUpChoices(3, player.id);
+    const { batch, isActive } = this.enqueueChoiceBatch(player, 'levelup', rolled);
+
+    if (!this.asyncLevelUps && this.state === 'playing' && isActive) {
+      this.state = 'levelup';
+    }
+
+    this.emit({
+      type: 'LevelUpTriggered',
+      playerId: player.id,
+      newLevel: player.level,
+      x: player.x,
+      y: player.y,
+      choices: isActive ? batch.choices : [],
+      batchId: batch.id,
+      pendingQueueCount: player.pendingQueueCount,
+    });
+  }
+
+  private enqueueChoiceBatch(
+    player: PlayerState,
+    source: PendingChoiceSource,
+    choices: LevelUpChoice[]
+  ): { batch: PendingChoiceBatch; isActive: boolean } {
+    const batch: PendingChoiceBatch = {
+      id: this.nextChoiceBatchId++,
+      source,
+      choices,
+    };
+    const isActive = player.pendingChoiceQueue.length === 0;
+    player.pendingChoiceQueue.push(batch);
+    this.syncPlayerChoiceState(player);
+
+    this.emit({
+      type: 'UpgradeChoicesQueued',
+      playerId: player.id,
+      batchId: batch.id,
+      source,
+      choices: batch.choices,
+      pendingQueueCount: player.pendingQueueCount,
+      isActive,
+    });
+
+    return { batch, isActive };
+  }
+
+  private syncPlayerChoiceState(player: PlayerState): void {
+    const head = player.pendingChoiceQueue[0];
+    player.pendingChoices = head ? head.choices : [];
+    player.pendingQueueCount = Math.max(0, player.pendingChoiceQueue.length - 1);
+    player.pendingLevelUps = player.pendingQueueCount;
+
+    if (head && head.source === 'boss_chest') {
+      player.pendingArtifactChoices = head.choices
+        .filter((c): c is LevelUpChoice & { artifactId: ArtifactId } => Boolean(c.artifactId))
+        .map((c) => getArtifactDef(c.artifactId));
+    } else {
+      player.pendingArtifactChoices = [];
+    }
+
+    this.syncPlayerStateFlags(player);
+  }
+
+  private syncPlayerStateFlags(player: PlayerState): void {
+    // Preserve transient revive-circle flags; recompute persistent status flags
+    let flags =
+      player.stateFlags & (PlayerStateFlag.REVIVING_ALLY | PlayerStateFlag.BEING_REVIVED);
+    if (player.pendingChoiceQueue.length > 0) {
+      flags |= PlayerStateFlag.CHOOSING_UPGRADE;
+    }
+    if (player.downed) {
+      flags |= PlayerStateFlag.DOWNED;
+    }
+    if (!player.downed && player.invulnTimer > 0) {
+      flags |= PlayerStateFlag.INVULNERABLE;
+    }
+    player.stateFlags = flags;
+  }
+
+  private syncEnemyStateFlags(enemy: EnemyEntity): void {
+    let flags = EnemyStateFlag.NONE;
+    if (enemy.slowTimer > 0) flags |= EnemyStateFlag.CHILLED;
+    if (enemy.freezeTimer > 0) flags |= EnemyStateFlag.FROZEN;
+    if (enemy.stunTimer > 0) flags |= EnemyStateFlag.STUNNED;
+    if (enemy.burnTimer > 0) flags |= EnemyStateFlag.BURNING;
+    if (enemy.tauntTimer > 0 && enemy.tauntTargetId !== null) flags |= EnemyStateFlag.TAUNTED;
+    if (enemy.isElite) flags |= EnemyStateFlag.ELITE;
+    enemy.chilled = enemy.slowTimer > 0;
+    enemy.stateFlags = flags;
   }
 
   public resume(playerId?: PlayerId): SimEvent[] {
     const p = this.resolvePlayer(playerId);
-    if (this.state === 'paused' && p.pendingLevelUps > 0) {
-      p.pendingLevelUps--;
-      this.openNextLevelUp(p);
+    if (!this.asyncLevelUps && this.state === 'paused' && p.pendingChoiceQueue.length > 0) {
+      this.openHeadBatchForSolo(p);
       return this.drainEvents();
     }
     if (this.state === 'paused' || this.state === 'levelup' || this.state === 'artifact') {
@@ -644,25 +1059,11 @@ export class GameSimulation {
     player.computedStats = buildComputedStats(player);
     player.speed = player.computedStats.moveSpeed;
     player.maxHp = player.computedStats.maxHp;
-    if (healOnMaxHpGain && player.maxHp > prevMaxHp) {
+    if (!player.downed && healOnMaxHpGain && player.maxHp > prevMaxHp) {
       player.hp = Math.min(player.maxHp, player.hp + (player.maxHp - prevMaxHp));
-    } else {
+    } else if (!player.downed) {
       player.hp = Math.min(player.maxHp, player.hp);
     }
-  }
-
-  private openNextLevelUp(player: PlayerState): void {
-    const choices = this.generateLevelUpChoices(3, player.id);
-    player.pendingChoices = choices;
-    this.state = 'levelup';
-    this.emit({
-      type: 'LevelUpTriggered',
-      playerId: player.id,
-      newLevel: player.level,
-      x: player.x,
-      y: player.y,
-      choices,
-    });
   }
 
   // ==========================================================================
@@ -673,42 +1074,65 @@ export class GameSimulation {
     archetypeId: EnemySpriteId,
     x: number,
     y: number,
-    hpOverride?: number
+    hpOverride?: number,
+    opts?: { forceElite?: boolean; skipOverflow?: boolean }
   ): EnemyEntity {
     const def = ENEMIES[archetypeId];
-    const minutes = this.elapsedRunSec / 60;
-    const maxHp = Math.round(hpOverride ?? enemyHP(def.baseHp, minutes));
-    const xpValue = Math.max(1, Math.round(enemyXP(def.baseXp, minutes)));
+    const minutes = this.getEffectiveMinutes();
+    const playerCount = this.getPlayerCount();
+    const overflow = opts?.skipOverflow
+      ? { hpMult: 1, xpMult: 1, eliteChance: 0 }
+      : this.getOverflowMultipliers();
+
+    const isElite =
+      opts?.forceElite ?? (overflow.eliteChance > 0 && this.rng.next() < overflow.eliteChance);
+    const eliteHpMult = isElite ? 1.6 : 1;
+    const eliteXpMult = isElite ? 2.0 : 1;
+    const eliteDmgMult = isElite ? 1.15 : 1;
+
+    const scaledHp = scaledEnemyHP(def.baseHp, minutes, playerCount) * overflow.hpMult * eliteHpMult;
+    const maxHp = Math.round(hpOverride ?? scaledHp);
+    const xpValue = Math.max(
+      1,
+      Math.round(scaledEnemyXP(def.baseXp, minutes, playerCount) * overflow.xpMult * eliteXpMult)
+    );
     const nearest = this.findNearestAlivePlayer(x, y);
 
     const enemy: EnemyEntity = {
       id: this.nextEnemyId++,
       archetypeId,
       isBoss: false,
+      isElite,
       x,
       y,
       vx: 0,
       vy: 0,
       kbVx: 0,
       kbVy: 0,
-      radius: def.radius,
+      radius: isElite ? Math.round(def.radius * 1.2) : def.radius,
       hp: maxHp,
       maxHp,
       speed: def.speed,
-      damage: def.damage * (1 + 0.06 * minutes),
+      damage: def.damage * (1 + 0.06 * minutes) * eliteDmgMult,
       xpValue,
-      knockbackResist: def.knockbackResist,
+      knockbackResist: isElite
+        ? Math.min(0.85, def.knockbackResist + 0.2)
+        : def.knockbackResist,
       facingLeft: nearest ? x > nearest.x : false,
       walkTime: this.rng.next() * 2,
       hitFlashTimer: 0,
       slowTimer: 0,
       slowFactor: 1,
+      chilled: false,
       freezeTimer: 0,
       stunTimer: 0,
       burnTimer: 0,
       burnDps: 0,
       burnTickTimer: 0,
       burnColor: PALETTE.coral,
+      tauntTimer: 0,
+      tauntTargetId: null,
+      stateFlags: isElite ? EnemyStateFlag.ELITE : EnemyStateFlag.NONE,
       rangedCooldown: def.rangedCooldown
         ? def.rangedCooldown * (0.5 + this.rng.next() * 0.5)
         : 0,
@@ -732,12 +1156,14 @@ export class GameSimulation {
         : this.nextBossEncounterIndex;
 
     const bossDef = bossId ? BOSSES[bossId] : getBossForEncounter(encounterIndex);
-    const minutes = this.elapsedRunSec / 60;
-    const maxHp = getBossScaledHp(bossDef, minutes, encounterIndex);
-    const xpValue = Math.max(40, Math.round(enemyXP(bossDef.baseXp, minutes)));
+    const minutes = this.getEffectiveMinutes();
+    const playerCount = this.getPlayerCount();
+    const soloBossHp = getBossScaledHp(bossDef, minutes, encounterIndex);
+    const maxHp = scaledBossHP(soloBossHp, playerCount);
+    const xpValue = Math.max(40, Math.round(scaledEnemyXP(bossDef.baseXp, minutes, playerCount)));
     const contactDamage = bossDef.contactDamage * getBossDamageScale(minutes, encounterIndex);
 
-    // Guarantee room for the boss even if regular waves hit MAX_ENEMIES
+    // Guarantee room for the boss even if regular waves hit MAX_ENEMIES (350)
     if (this.enemies.length >= MAX_ENEMIES) {
       let farIdx = -1;
       let farDistSq = -1;
@@ -772,6 +1198,7 @@ export class GameSimulation {
       archetypeId: 'golem',
       bossId: bossDef.id,
       isBoss: true,
+      isElite: false,
       bossEncounterIndex: encounterIndex,
       x: sx,
       y: sy,
@@ -791,12 +1218,16 @@ export class GameSimulation {
       hitFlashTimer: 0,
       slowTimer: 0,
       slowFactor: 1,
+      chilled: false,
       freezeTimer: 0,
       stunTimer: 0,
       burnTimer: 0,
       burnDps: 0,
       burnTickTimer: 0,
       burnColor: bossDef.accentColor,
+      tauntTimer: 0,
+      tauntTargetId: null,
+      stateFlags: EnemyStateFlag.NONE,
       rangedCooldown: 0,
       aiState: 'normal',
       aiTimer: 0,
@@ -893,6 +1324,7 @@ export class GameSimulation {
     if (opts.chillDuration && opts.chillDuration > 0) {
       enemy.slowTimer = Math.max(enemy.slowTimer, opts.chillDuration);
       enemy.slowFactor = Math.min(enemy.slowFactor, opts.chillFactor ?? 0.55);
+      enemy.chilled = true;
     }
     if (opts.freezeDuration && opts.freezeDuration > 0 && !enemy.isBoss) {
       enemy.freezeTimer = Math.max(enemy.freezeTimer, opts.freezeDuration);
@@ -905,6 +1337,20 @@ export class GameSimulation {
       enemy.burnDps = Math.max(enemy.burnDps, opts.burnDps);
       enemy.burnColor = opts.burnColor ?? PALETTE.coral;
     }
+    if (opts.tauntDuration && opts.tauntDuration > 0 && !enemy.isBoss) {
+      const taunterId = opts.tauntTargetId ?? attacker.id;
+      enemy.tauntTimer = Math.max(enemy.tauntTimer, opts.tauntDuration);
+      enemy.tauntTargetId = taunterId;
+      this.emit({
+        type: 'EnemyTaunted',
+        enemyId: enemy.id,
+        targetPlayerId: taunterId,
+        durationSec: enemy.tauntTimer,
+        x: enemy.x,
+        y: enemy.y,
+      });
+    }
+    this.syncEnemyStateFlags(enemy);
 
     // Knockback impulse
     if (opts.knockback && opts.knockback > 0) {
@@ -944,10 +1390,47 @@ export class GameSimulation {
     return false;
   };
 
+  /**
+   * Taunts nearby non-boss enemies within `radius` to focus `taunterId` for `durationSec`.
+   * Used by Knight's Shield Bash and Bastion Quake to peel packs off teammates.
+   */
+  public tauntNearbyEnemies(
+    taunterId: PlayerId,
+    x: number,
+    y: number,
+    radius: number,
+    durationSec = 2.5
+  ): number {
+    const taunter = this.players.get(taunterId);
+    if (!taunter || !taunter.alive || taunter.downed || durationSec <= 0) return 0;
+
+    const candidates = this.spatialHash.queryRadius(x, y, radius, this.tauntQueryBuf);
+    let tauntedCount = 0;
+
+    for (let i = 0; i < candidates.length; i++) {
+      const enemy = candidates[i];
+      if (!enemy.alive || enemy.isBoss) continue;
+      enemy.tauntTimer = Math.max(enemy.tauntTimer, durationSec);
+      enemy.tauntTargetId = taunterId;
+      this.syncEnemyStateFlags(enemy);
+      this.emit({
+        type: 'EnemyTaunted',
+        enemyId: enemy.id,
+        targetPlayerId: taunterId,
+        durationSec: enemy.tauntTimer,
+        x: enemy.x,
+        y: enemy.y,
+      });
+      tauntedCount++;
+    }
+
+    return tauntedCount;
+  }
+
   public healPlayer = (amount: number, playerId?: PlayerId): void => {
     if (amount <= 0) return;
     const p = this.resolvePlayer(playerId);
-    if (!p.alive) return;
+    if (!p.alive || p.downed) return;
     const before = p.hp;
     p.hp = Math.min(p.maxHp, p.hp + amount);
     const healed = Math.round(p.hp - before);
@@ -964,7 +1447,7 @@ export class GameSimulation {
 
   public damagePlayer(rawDamage: number, playerId?: PlayerId): void {
     const p = this.resolvePlayer(playerId);
-    if (!p.alive || p.invulnTimer > 0 || this.state !== 'playing') return;
+    if (!p.alive || p.downed || p.invulnTimer > 0 || this.state !== 'playing') return;
 
     const mitigated = Math.max(1, Math.round(rawDamage * (1 - p.computedStats.armor)));
     p.hp = Math.max(0, p.hp - mitigated);
@@ -989,8 +1472,22 @@ export class GameSimulation {
     }
 
     if (p.hp <= 0) {
+      p.hp = 0;
       p.alive = false;
-      // Game over when all players are downed
+      p.downed = true;
+      p.invulnTimer = 0;
+      p.reviveProgressSec = 0;
+      p.revivePct = 0;
+      this.syncPlayerStateFlags(p);
+
+      this.emit({
+        type: 'PlayerDowned',
+        playerId: p.id,
+        x: p.x,
+        y: p.y,
+      });
+
+      // Game over triggers ONLY when ALL connected players are downed simultaneously
       if (this.getAlivePlayers().length === 0) {
         this.state = 'gameover';
         this.emit({
@@ -998,7 +1495,36 @@ export class GameSimulation {
           snapshot: this.getRunStatsSnapshot(p.id),
         });
       }
+    } else {
+      this.syncPlayerStateFlags(p);
     }
+  }
+
+  private revivePlayer(
+    player: PlayerState,
+    hpRatio: number,
+    reason: 'circle' | 'boss_kill',
+    reviverIds: PlayerId[]
+  ): void {
+    if (!player.downed && player.alive) return;
+    player.downed = false;
+    player.alive = true;
+    player.hp = Math.max(1, Math.round(player.maxHp * hpRatio));
+    player.invulnTimer = Math.max(player.invulnTimer, REVIVE_INVULN_SEC);
+    player.reviveProgressSec = 0;
+    player.revivePct = 0;
+    player.stateFlags &= ~(PlayerStateFlag.BEING_REVIVED | PlayerStateFlag.DOWNED);
+    this.syncPlayerStateFlags(player);
+
+    this.emit({
+      type: 'PlayerRevived',
+      playerId: player.id,
+      reason,
+      reviverIds,
+      x: player.x,
+      y: player.y,
+      hp: player.hp,
+    });
   }
 
   private handleEnemyDeath(enemy: EnemyEntity): void {
@@ -1023,6 +1549,13 @@ export class GameSimulation {
         accentColor: bossAccent,
       });
 
+      // Killing any Boss immediately auto-revives all downed players at 50% HP
+      for (const p of this.players.values()) {
+        if (p.downed || !p.alive) {
+          this.revivePlayer(p, BOSS_KILL_REVIVE_HP_RATIO, 'boss_kill', []);
+        }
+      }
+
       // Scatter a rewarding burst of large XP gems around the boss
       const gemCount = 4;
       const perGemXp = Math.max(10, Math.round(enemy.xpValue / gemCount));
@@ -1036,7 +1569,7 @@ export class GameSimulation {
         );
       }
 
-      // Drop Boss Chest at the boss's defeat location
+      // Drop one shared Boss Chest at the boss's defeat location
       this.spawnPickup('chest', enemy.x, enemy.y, 0, enemy.bossId);
 
       if (bossInfo) {
@@ -1101,9 +1634,11 @@ export class GameSimulation {
       return this.drainEvents();
     }
 
+    this.tickCount += 1;
     this.elapsedRunSec += dt;
 
     this.updatePlayers(dt, inputs);
+    this.updateReviveCircles(dt);
     this.updateWaveSpawner(dt);
     this.updateEnemies(dt);
     this.updateEnemyProjectiles(dt);
@@ -1115,9 +1650,9 @@ export class GameSimulation {
     this.spatialHash.clear();
     this.spatialHash.insertAll(this.enemies);
 
-    // Execute all active abilities & evolved synergies for every alive player
+    // Execute all active abilities & evolved synergies for every alive (non-downed) player
     for (const player of this.players.values()) {
-      if (!player.alive) continue;
+      if (!player.alive || player.downed) continue;
       const runner = this.abilityRunners.get(player.id);
       if (!runner) continue;
       const combatCtx = this.createCombatContext(player);
@@ -1154,7 +1689,29 @@ export class GameSimulation {
     inputs: ReadonlyMap<PlayerId, PlayerInput> | Readonly<Record<PlayerId, PlayerInput>>
   ): void {
     for (const p of this.players.values()) {
-      if (!p.alive) continue;
+      const input = this.getInputForPlayer(p.id, inputs);
+      const mx = input?.moveX ?? 0;
+      const my = input?.moveY ?? 0;
+
+      // Downed Pastel Ghost / Spirit: slow drift only, cannot attack, regen, or collect XP
+      if (p.downed || !p.alive) {
+        const ghostSpeed = p.speed * GHOST_DRIFT_SPEED_MULT;
+        p.vx = mx * ghostSpeed;
+        p.vy = my * ghostSpeed;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.isMoving = Math.abs(mx) > 0.01 || Math.abs(my) > 0.01;
+        if (p.isMoving) {
+          p.walkTime += dt * 0.6;
+          if (Math.abs(mx) > 0.05) {
+            p.facingLeft = mx < 0;
+          }
+        } else {
+          p.walkTime = 0;
+        }
+        this.syncPlayerStateFlags(p);
+        continue;
+      }
 
       if (p.invulnTimer > 0) p.invulnTimer = Math.max(0, p.invulnTimer - dt);
       if (p.hitFlashTimer > 0) p.hitFlashTimer = Math.max(0, p.hitFlashTimer - dt);
@@ -1171,9 +1728,6 @@ export class GameSimulation {
         p.hp = Math.min(p.maxHp, p.hp + p.computedStats.hpRegen * dt);
       }
 
-      const input = this.getInputForPlayer(p.id, inputs);
-      const mx = input?.moveX ?? 0;
-      const my = input?.moveY ?? 0;
       p.aimMode = input?.aimMode ?? 'auto';
 
       p.vx = mx * p.speed;
@@ -1209,6 +1763,57 @@ export class GameSimulation {
           }
         }
       }
+
+      this.syncPlayerStateFlags(p);
+    }
+  }
+
+  /**
+   * Standing inside a downed ally's revive circle accumulates progress toward
+   * 10.0 cumulative seconds (does NOT reset when stepping out to dodge).
+   * Reaching 10.0s revives the ally at 20% HP with 2.0s of invulnerability.
+   */
+  private updateReviveCircles(dt: number): void {
+    const reviveRadiusSq = REVIVE_CIRCLE_RADIUS * REVIVE_CIRCLE_RADIUS;
+
+    // Reset transient circle flags each tick
+    for (const p of this.players.values()) {
+      p.stateFlags &= ~(PlayerStateFlag.REVIVING_ALLY | PlayerStateFlag.BEING_REVIVED);
+    }
+
+    const alivePlayers = this.getAlivePlayers();
+    if (alivePlayers.length === 0) return;
+
+    for (const downedPlayer of this.players.values()) {
+      if (!downedPlayer.downed) continue;
+
+      const reviversInside: PlayerId[] = [];
+      for (let i = 0; i < alivePlayers.length; i++) {
+        const ally = alivePlayers[i];
+        if (ally.id === downedPlayer.id) continue;
+        const dx = ally.x - downedPlayer.x;
+        const dy = ally.y - downedPlayer.y;
+        if (dx * dx + dy * dy <= reviveRadiusSq) {
+          reviversInside.push(ally.id);
+          ally.stateFlags |= PlayerStateFlag.REVIVING_ALLY;
+        }
+      }
+
+      if (reviversInside.length > 0) {
+        downedPlayer.stateFlags |= PlayerStateFlag.BEING_REVIVED;
+        downedPlayer.reviveProgressSec = Math.min(
+          REVIVE_DURATION_SEC,
+          downedPlayer.reviveProgressSec + dt
+        );
+        downedPlayer.revivePct = Math.min(1, downedPlayer.reviveProgressSec / REVIVE_DURATION_SEC);
+
+        if (downedPlayer.reviveProgressSec >= REVIVE_DURATION_SEC - 1e-6) {
+          this.revivePlayer(downedPlayer, REVIVE_HP_RATIO, 'circle', reviversInside);
+        }
+      } else {
+        // Cumulative progress is preserved while no ally is inside
+        downedPlayer.revivePct = Math.min(1, downedPlayer.reviveProgressSec / REVIVE_DURATION_SEC);
+      }
     }
   }
 
@@ -1216,7 +1821,7 @@ export class GameSimulation {
     let best: PlayerState | null = null;
     let bestDistSq = Infinity;
     for (const p of this.players.values()) {
-      if (!p.alive) continue;
+      if (!p.alive || p.downed) continue;
       const dx = p.x - x;
       const dy = p.y - y;
       const dSq = dx * dx + dy * dy;
@@ -1232,46 +1837,70 @@ export class GameSimulation {
     const alivePlayers = this.getAlivePlayers();
     if (alivePlayers.length === 0) return;
 
-    // 1. Scheduled 10-minute Boss encounters
-    let nextBossSec = (this.nextBossEncounterIndex + 1) * BOSS_SPAWN_INTERVAL_MIN * 60;
+    // 1. Scheduled Boss encounters (Standard: 10:00/20:00/30:00, Co-op Pace: 5:00/10:00/15:00/20:00)
+    const bossIntervalSec = this.getBossSpawnIntervalSec();
+    let nextBossSec = (this.nextBossEncounterIndex + 1) * bossIntervalSec;
     while (this.elapsedRunSec >= nextBossSec) {
       const encounterIdx = this.nextBossEncounterIndex;
       this.nextBossEncounterIndex += 1;
       const bossDef = getBossForEncounter(encounterIdx);
       this.spawnBoss(bossDef.id, encounterIdx);
-      nextBossSec = (this.nextBossEncounterIndex + 1) * BOSS_SPAWN_INTERVAL_MIN * 60;
+      nextBossSec = (this.nextBossEncounterIndex + 1) * bossIntervalSec;
     }
 
-    if (this.enemies.length >= MAX_ENEMIES) return;
-
-    const minutes = this.elapsedRunSec / 60;
+    const minutes = this.getEffectiveMinutes();
+    const playerCount = this.getPlayerCount();
     const bossActive = this.bossAI.hasActiveBoss();
     const spawnRadius = Math.hypot(this.arenaWidth * 0.5, this.arenaHeight * 0.5) + 75;
 
     // 2. Continuous scaled wave spawning (eased slightly during boss fights for readability)
-    const rate = enemySpawnRate(minutes) * (bossActive ? 0.55 : 1);
+    const rate = scaledSpawnRate(minutes, playerCount) * (bossActive ? 0.55 : 1);
     this.spawnAccumulator += rate * dt;
 
-    while (this.spawnAccumulator >= 1 && this.enemies.length < MAX_ENEMIES) {
-      this.spawnAccumulator -= 1;
-      const anchor = alivePlayers[Math.floor(this.rng.next() * alivePlayers.length)];
-      const archetype = pickWaveArchetype(minutes, this.rng.next());
-      const angle = this.rng.next() * Math.PI * 2;
-      const dist = spawnRadius + this.rng.next() * 80;
-      const sx = anchor.x + Math.cos(angle) * dist;
-      const sy = anchor.y + Math.sin(angle) * dist;
-      this.spawnEnemy(archetype.id, sx, sy);
+    // Hard Active Enemy Cap: 350 enemies per room.
+    // Above the cap, stop adding entities and convert overflow spawn pressure into
+    // higher enemy HP, XP gem value, and elite spawn chance.
+    if (this.enemies.length >= MAX_ENEMIES) {
+      const overflowUnits = Math.floor(this.spawnAccumulator);
+      if (overflowUnits > 0) {
+        this.spawnAccumulator -= overflowUnits;
+        this.overflowSpawnPressure = Math.min(100, this.overflowSpawnPressure + overflowUnits * 0.6);
+      }
+    } else {
+      while (this.spawnAccumulator >= 1 && this.enemies.length < MAX_ENEMIES) {
+        this.spawnAccumulator -= 1;
+        const anchor = alivePlayers[Math.floor(this.rng.next() * alivePlayers.length)];
+        const archetype = pickWaveArchetype(minutes, this.rng.next());
+        const angle = this.rng.next() * Math.PI * 2;
+        const dist = spawnRadius + this.rng.next() * 80;
+        const sx = anchor.x + Math.cos(angle) * dist;
+        const sy = anchor.y + Math.sin(angle) * dist;
+        this.spawnEnemy(archetype.id, sx, sy);
+      }
+
+      if (this.enemies.length >= MAX_ENEMIES && this.spawnAccumulator >= 1) {
+        const overflowUnits = Math.floor(this.spawnAccumulator);
+        this.spawnAccumulator -= overflowUnits;
+        this.overflowSpawnPressure = Math.min(100, this.overflowSpawnPressure + overflowUnits * 0.6);
+      } else if (this.overflowSpawnPressure > 0) {
+        this.overflowSpawnPressure = Math.max(0, this.overflowSpawnPressure - dt * 1.2);
+      }
     }
 
     // 3. Periodic coordinated swarm clusters (every 50s when no boss is active)
     if (!bossActive && this.elapsedRunSec >= this.nextSwarmWaveSec) {
       this.nextSwarmWaveSec += 50;
       const anchor = alivePlayers[Math.floor(this.rng.next() * alivePlayers.length)];
-      const packSize = Math.min(18, 6 + Math.floor(minutes * 1.4));
+      const packSize = Math.min(24, Math.round((6 + Math.floor(minutes * 1.4)) * (1 + 0.25 * (playerCount - 1))));
       const baseAngle = this.rng.next() * Math.PI * 2;
       const arcSpan = Math.min(Math.PI * 1.2, 0.7 + minutes * 0.06);
 
-      for (let i = 0; i < packSize && this.enemies.length < MAX_ENEMIES; i++) {
+      let skipped = 0;
+      for (let i = 0; i < packSize; i++) {
+        if (this.enemies.length >= MAX_ENEMIES) {
+          skipped++;
+          continue;
+        }
         const frac = packSize > 1 ? i / (packSize - 1) - 0.5 : 0;
         const a = baseAngle + frac * arcSpan + (this.rng.next() - 0.5) * 0.12;
         const d = spawnRadius + 30 + this.rng.next() * 75;
@@ -1279,6 +1908,10 @@ export class GameSimulation {
         const sy = anchor.y + Math.sin(a) * d;
         const isBruteLead = minutes >= 3.5 && i === Math.floor(packSize / 2);
         this.spawnEnemy(isBruteLead ? 'golem' : 'slime', sx, sy);
+      }
+
+      if (skipped > 0) {
+        this.overflowSpawnPressure = Math.min(100, this.overflowSpawnPressure + skipped * 0.5);
       }
     }
   }
@@ -1302,6 +1935,10 @@ export class GameSimulation {
         e.slowTimer = Math.max(0, e.slowTimer - dt);
         if (e.slowTimer === 0) e.slowFactor = 1;
       }
+      if (e.tauntTimer > 0) {
+        e.tauntTimer = Math.max(0, e.tauntTimer - dt);
+        if (e.tauntTimer === 0) e.tauntTargetId = null;
+      }
 
       // Burn / bleed DoT ticks
       if (e.burnTimer > 0) {
@@ -1318,7 +1955,23 @@ export class GameSimulation {
         }
       }
 
-      const target = this.findNearestAlivePlayer(e.x, e.y);
+      this.syncEnemyStateFlags(e);
+
+      // Taunted non-boss enemies aggressively focus the taunting Knight
+      let target: PlayerState | null = null;
+      if (!e.isBoss && e.tauntTimer > 0 && e.tauntTargetId) {
+        const taunter = this.players.get(e.tauntTargetId);
+        if (taunter && taunter.alive && !taunter.downed) {
+          target = taunter;
+        } else {
+          e.tauntTimer = 0;
+          e.tauntTargetId = null;
+          this.syncEnemyStateFlags(e);
+        }
+      }
+      if (!target) {
+        target = this.findNearestAlivePlayer(e.x, e.y);
+      }
       if (!target) continue;
 
       // Boss state machine execution
@@ -1328,7 +1981,7 @@ export class GameSimulation {
         if (canDealContact) {
           for (let pi = 0; pi < alivePlayers.length; pi++) {
             const pl = alivePlayers[pi];
-            if (!pl.alive) continue;
+            if (!pl.alive || pl.downed) continue;
             const bdx = pl.x - e.x;
             const bdy = pl.y - e.y;
             const hitDist = pl.radius + e.radius - 3;
@@ -1558,7 +2211,7 @@ export class GameSimulation {
       let hit = false;
       for (let pi = 0; pi < alivePlayers.length; pi++) {
         const pl = alivePlayers[pi];
-        if (!pl.alive) continue;
+        if (!pl.alive || pl.downed) continue;
         const dx = pl.x - proj.x;
         const dy = pl.y - proj.y;
         const hitR = pl.radius + proj.radius;
@@ -1591,11 +2244,13 @@ export class GameSimulation {
       const item = this.pickups[i];
       item.age += dt;
 
-      // Determine attracting/nearest alive player
+      // Determine attracting/nearest living (non-downed) player
       let target: PlayerState | null = item.magnetTargetId
         ? this.players.get(item.magnetTargetId) ?? null
         : null;
-      if (!target || !target.alive) {
+      if (!target || !target.alive || target.downed) {
+        item.magnetized = false;
+        item.magnetTargetId = undefined;
         target = this.findNearestAlivePlayer(item.x, item.y);
       }
       if (!target) continue;
@@ -1639,7 +2294,10 @@ export class GameSimulation {
   }
 
   private collectPickup(item: PickupEntity, player: PlayerState): void {
+    if (!player.alive || player.downed) return;
+
     if (item.kind === 'xp_small' || item.kind === 'xp_medium' || item.kind === 'xp_large') {
+      // Strictly personal XP: add XP ONLY to the player who collected the gem
       const gained = Math.max(1, Math.round(item.value * player.computedStats.xpGainMult));
       player.xp += gained;
 
@@ -1656,28 +2314,9 @@ export class GameSimulation {
         xpTier: tier,
       });
 
-      let leveled = false;
-      while (player.xp >= xpNeeded(player.level)) {
-        player.xp -= xpNeeded(player.level);
-        player.level += 1;
-        player.pendingLevelUps += 1;
-        leveled = true;
-      }
-
-      if (leveled) {
-        if (this.state === 'playing' && player.pendingLevelUps > 0) {
-          player.pendingLevelUps--;
-          this.openNextLevelUp(player);
-        } else {
-          this.emit({
-            type: 'LevelUpTriggered',
-            playerId: player.id,
-            newLevel: player.level,
-            x: player.x,
-            y: player.y,
-            choices: [],
-          });
-        }
+      while (player.xp >= player.xpToNext) {
+        player.xp -= player.xpToNext;
+        this.triggerSinglePersonalLevelUp(player);
       }
       return;
     }
@@ -1714,19 +2353,54 @@ export class GameSimulation {
     }
 
     if (item.kind === 'chest') {
-      this.healPlayer(Math.round(player.maxHp * 0.35), player.id);
-      const ownedSet = new Set(player.ownedArtifacts);
-      const available = getAvailableBossArtifacts(player.heroId, ownedSet);
-      player.pendingArtifactChoices = available;
-      this.state = 'artifact';
+      if (this.asyncLevelUps || this.players.size > 1) {
+        // Shared Boss Chest: heal all living players and simultaneously push a
+        // 3-option Boss Artifact choice batch into EVERY player's personal queue (zero loot stealing).
+        for (const p of this.players.values()) {
+          if (p.alive && !p.downed) {
+            this.healPlayer(Math.round(p.maxHp * 0.35), p.id);
+          }
+          const ownedSet = new Set(p.ownedArtifacts);
+          const availableDefs = getAvailableBossArtifacts(p.heroId, ownedSet);
+          const artifactChoices = generateBossArtifactChoicesForPlayer(p, 3);
+          const { batch } = this.enqueueChoiceBatch(p, 'boss_chest', artifactChoices);
 
-      this.emit({
-        type: 'BossChestOpened',
-        playerId: player.id,
-        x: player.x,
-        y: player.y,
-        choices: available,
-      });
+          this.emit({
+            type: 'BossChestOpened',
+            playerId: p.id,
+            openedByPlayerId: player.id,
+            x: item.x,
+            y: item.y,
+            choices: availableDefs,
+            upgradeChoices: batch.choices,
+            batchId: batch.id,
+            pendingQueueCount: p.pendingQueueCount,
+          });
+        }
+      } else {
+        // Solo offline mode: pause and present modal
+        this.healPlayer(Math.round(player.maxHp * 0.35), player.id);
+        const ownedSet = new Set(player.ownedArtifacts);
+        const availableDefs = getAvailableBossArtifacts(player.heroId, ownedSet);
+        const artifactChoices = generateBossArtifactChoicesForPlayer(player, 3);
+        const { batch, isActive } = this.enqueueChoiceBatch(player, 'boss_chest', artifactChoices);
+        if (isActive) {
+          player.pendingArtifactChoices = availableDefs;
+          this.state = 'artifact';
+        }
+
+        this.emit({
+          type: 'BossChestOpened',
+          playerId: player.id,
+          openedByPlayerId: player.id,
+          x: player.x,
+          y: player.y,
+          choices: availableDefs,
+          upgradeChoices: batch.choices,
+          batchId: batch.id,
+          pendingQueueCount: player.pendingQueueCount,
+        });
+      }
     }
   }
 
@@ -1745,6 +2419,8 @@ export class GameSimulation {
       viewportHeight: this.arenaHeight,
       damageEnemy: (enemy, rawDamage, opts = {}) =>
         this.damageEnemy(enemy, rawDamage, { ...opts, playerId: player.id }),
+      tauntNearbyEnemies: (x, y, radius, durationSec) =>
+        this.tauntNearbyEnemies(player.id, x, y, radius, durationSec),
       healPlayer: (amount) => this.healPlayer(amount, player.id),
       spawnParticles: (x, y, color, count, opts?: ParticleBurstOptions) =>
         this.emit({ type: 'VfxBurst', x, y, color, count, opts }),

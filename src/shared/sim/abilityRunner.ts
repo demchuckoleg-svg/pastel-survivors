@@ -47,6 +47,7 @@ export interface CombatContext {
   viewportWidth: number;
   viewportHeight: number;
   damageEnemy: (enemy: EnemyEntity, rawDamage: number, opts?: DamageOptions) => boolean;
+  tauntNearbyEnemies?: (x: number, y: number, radius: number, durationSec: number) => number;
   healPlayer: (amount: number) => void;
   spawnParticles: (
     x: number,
@@ -944,6 +945,7 @@ export class AbilityRunner {
 
       case 'shield_bash': {
         const bashes = Math.min(4, count);
+        const tauntRadius = Math.max(area * 1.45, 175);
         for (let i = 0; i < bashes; i++) {
           const delay = i * 0.14;
           const spawnBash = (): void => {
@@ -960,7 +962,9 @@ export class AbilityRunner {
               age: 0,
               maxLife: stats.duration,
               hitIds: new Set(),
+              tauntDuration: 2.5,
             });
+            ctx.tauntNearbyEnemies?.(ctx.player.x, ctx.player.y, tauntRadius, 2.5);
             ctx.addScreenShake(2.2, 0.1);
           };
           if (delay === 0) {
@@ -1586,8 +1590,9 @@ export class AbilityRunner {
       }
 
       case 'bastion_quake': {
-        // Double-ringed porcelain bastion quake: double_shockwave_ring, massive_knockback, micro_stun
+        // Double-ringed porcelain bastion quake: double_shockwave_ring, massive_knockback, micro_stun, 2.5s aggro peel
         const rings = Math.max(2, stats.count);
+        const tauntRadius = Math.max(area * 1.25, 220);
         for (let i = 0; i < rings; i++) {
           const delay = i * 0.22;
           const spawnRing = (): void => {
@@ -1605,10 +1610,12 @@ export class AbilityRunner {
               maxLife: stats.duration,
               hitIds: new Set(),
               stunDuration: 0.55,
+              tauntDuration: 2.5,
               followPlayer: true,
               killsThisCast: 0,
               lifestealAwarded: false,
             });
+            ctx.tauntNearbyEnemies?.(ctx.player.x, ctx.player.y, tauntRadius, 2.5);
             ctx.addScreenShake(5.0, 0.2);
             ctx.spawnParticles(ctx.player.x, ctx.player.y, PALETTE.babyBlueLight, 18, {
               speedMin: 90,
@@ -2287,6 +2294,7 @@ export class AbilityRunner {
           chillFactor: n.chillFactor,
           freezeDuration: n.freezeDuration,
           stunDuration: n.stunDuration,
+          tauntDuration: n.tauntDuration,
         });
         if (died) {
           n.killsThisCast++;
@@ -2454,6 +2462,7 @@ export class AbilityRunner {
             sourceX: p.x,
             sourceY: p.y,
             color: arc.color,
+            tauntDuration: arc.tauntDuration,
           });
         }
       }

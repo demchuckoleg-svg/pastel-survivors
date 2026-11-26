@@ -212,6 +212,8 @@ export const BOSSES: Record<BossId, BossDef> = {
 export const BOSS_ORDER: readonly BossId[] = ['king_mochi', 'lady_wisteria', 'aegis'];
 export const BOSS_LIST: readonly BossDef[] = BOSS_ORDER.map((id) => BOSSES[id]);
 export const BOSS_SPAWN_INTERVAL_MIN = 10;
+export const COOP_BOSS_SPAWN_INTERVAL_MIN = 5;
+export const COOP_PACE_TIME_SCALE = 1.5;
 
 export function getEnemyDef(id: EnemySpriteId): EnemyArchetypeDef {
   return ENEMIES[id];
@@ -223,7 +225,7 @@ export function getBossDef(id: BossId): BossDef {
 
 /**
  * Returns the BossDef scheduled for a 0-based boss encounter index
- * (0 = 10:00 King Mochi, 1 = 20:00 Lady Wisteria, 2 = 30:00 Aegis, cycling thereafter).
+ * (0 = King Mochi, 1 = Lady Wisteria, 2 = Aegis, cycling thereafter).
  */
 export function getBossForEncounter(encounterIndex: number): BossDef {
   const idx = Math.max(0, Math.floor(encounterIndex)) % BOSS_ORDER.length;
@@ -244,7 +246,7 @@ export function xpNeeded(level: number): number {
 }
 
 /**
- * Scaled enemy HP at elapsed time `t` (in minutes).
+ * Scaled solo enemy HP at elapsed time `t` (in minutes).
  * Exact formula: baseHP * (1 + 0.18 * t + 0.03 * t * t)
  */
 export function enemyHP(baseHP: number, t: number): number {
@@ -253,7 +255,7 @@ export function enemyHP(baseHP: number, t: number): number {
 }
 
 /**
- * Scaled enemy XP drop at elapsed time `t` (in minutes).
+ * Scaled solo enemy XP drop at elapsed time `t` (in minutes).
  * Exact formula: baseXP * (1 + 0.12 * t)
  */
 export function enemyXP(baseXP: number, t: number): number {
@@ -262,11 +264,63 @@ export function enemyXP(baseXP: number, t: number): number {
 }
 
 /**
- * Target enemies spawned per second at elapsed time `t` (in minutes).
+ * Target solo enemies spawned per second at elapsed time `t` (in minutes).
  */
 export function enemySpawnRate(t: number): number {
   const minutes = Math.max(0, t);
   return Math.min(9.5, 1.2 + minutes * 0.28 + Math.pow(minutes, 1.15) * 0.05);
+}
+
+// ============================================================================
+// CO-OP PLAYER-COUNT SCALING FORMULAS (P = connected player count, 1..4)
+// ============================================================================
+
+/** Standard Enemy HP multiplier for `P` players: `1 + 0.65 * (P - 1)`. */
+export function coopEnemyHpMultiplier(playerCount: number): number {
+  const p = Math.max(1, Math.floor(playerCount));
+  return 1 + 0.65 * (p - 1);
+}
+
+/** Boss HP multiplier for `P` players: `1 + 0.85 * (P - 1)`. */
+export function coopBossHpMultiplier(playerCount: number): number {
+  const p = Math.max(1, Math.floor(playerCount));
+  return 1 + 0.85 * (p - 1);
+}
+
+/** Spawn Rate multiplier for `P` players: `1 + 0.45 * (P - 1)`. */
+export function coopSpawnRateMultiplier(playerCount: number): number {
+  const p = Math.max(1, Math.floor(playerCount));
+  return 1 + 0.45 * (p - 1);
+}
+
+/**
+ * Generous personal XP gem scaling for `P` players (`1 + 0.25 * (P - 1)`)
+ * so that alongside the `1 + 0.45 * (P - 1)` spawn rate, each player's
+ * independent XP bar progresses at a steady pace comparable to solo.
+ */
+export function coopEnemyXpMultiplier(playerCount: number): number {
+  const p = Math.max(1, Math.floor(playerCount));
+  return 1 + 0.25 * (p - 1);
+}
+
+/** Standard Enemy HP scaled by elapsed minutes and player count `P`. */
+export function scaledEnemyHP(baseHP: number, t: number, playerCount = 1): number {
+  return enemyHP(baseHP, t) * coopEnemyHpMultiplier(playerCount);
+}
+
+/** Boss HP scaled from solo boss HP by player count `P`. */
+export function scaledBossHP(soloBossHP: number, playerCount = 1): number {
+  return Math.round(soloBossHP * coopBossHpMultiplier(playerCount));
+}
+
+/** Spawn rate scaled by elapsed minutes and player count `P`. */
+export function scaledSpawnRate(t: number, playerCount = 1): number {
+  return enemySpawnRate(t) * coopSpawnRateMultiplier(playerCount);
+}
+
+/** Enemy XP value scaled by elapsed minutes and player count `P`. */
+export function scaledEnemyXP(baseXP: number, t: number, playerCount = 1): number {
+  return enemyXP(baseXP, t) * coopEnemyXpMultiplier(playerCount);
 }
 
 /**

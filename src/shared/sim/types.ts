@@ -9,6 +9,7 @@ import type {
   EnemySpriteId,
   GlobalStatKey,
   HeroId,
+  IconId,
   PickupSpriteId,
   ProjectileSpriteId,
   SynergyId,
@@ -25,7 +26,42 @@ export type GameState =
   | 'artifact'
   | 'gameover';
 
+export type RoomMode = 'solo' | 'coop';
+
+/**
+ * Lobby pace mode:
+ * - `standard`: Classic 30-minute timeline (1.0x time scaling, bosses at 10:00, 20:00, 30:00).
+ * - `coop_pace`: Default for co-op (1.5x time scaling, bosses at 5:00, 10:00, 15:00, 20:00).
+ */
+export type RoomPaceMode = 'standard' | 'coop_pace';
+
 export type PlayerId = string;
+
+/**
+ * Bitmask flags broadcast per player so teammates see live state indicators
+ * (e.g., an upgrade badge above players currently picking a live draft card).
+ */
+export const PlayerStateFlag = {
+  NONE: 0,
+  CHOOSING_UPGRADE: 1 << 0,
+  DOWNED: 1 << 1,
+  INVULNERABLE: 1 << 2,
+  REVIVING_ALLY: 1 << 3,
+  BEING_REVIVED: 1 << 4,
+} as const;
+
+/**
+ * Bitmask flags broadcast per enemy for shared visual debuffs & elite aura.
+ */
+export const EnemyStateFlag = {
+  NONE: 0,
+  CHILLED: 1 << 0,
+  FROZEN: 1 << 1,
+  STUNNED: 1 << 2,
+  BURNING: 1 << 3,
+  TAUNTED: 1 << 4,
+  ELITE: 1 << 5,
+} as const;
 
 export interface PlayerInput {
   moveX: number;
@@ -72,11 +108,24 @@ export interface ActiveAbilitySlot {
   cooldownTimer: number;
 }
 
+export type ChoiceTier = 'standard' | 'milestone' | 'synergy' | 'artifact';
+
+export type PendingChoiceSource = 'levelup' | 'boss_chest';
+
 export interface LevelUpChoice {
-  kind: 'ability' | 'synergy' | 'mastery';
+  kind: 'ability' | 'synergy' | 'mastery' | 'artifact';
   abilityId?: AbilityId;
   synergyId?: SynergyId;
   masteryId?: string;
+  artifactId?: ArtifactId;
+  /** Speed-readable tier badge for live co-op drafting. */
+  tier: ChoiceTier;
+  /** Icon sprite identifier for fast recognition without reading prose. */
+  iconId: IconId;
+  /** Concise speed-readable title (e.g., `Fireball Lv 4`, `FIRESTORM`). */
+  shortTitle: string;
+  /** Concise speed-readable stat tag (e.g., `+1 Proj`, `ALL -5% CD`, `EVOLVE`). */
+  shortTag: string;
   title: string;
   subtitle: string;
   description: string;
@@ -86,6 +135,12 @@ export interface LevelUpChoice {
   color: string;
   masteryModifiers?: Partial<Record<GlobalStatKey, number>>;
   masteryHeal?: number;
+}
+
+export interface PendingChoiceBatch {
+  id: number;
+  source: PendingChoiceSource;
+  choices: LevelUpChoice[];
 }
 
 export interface PlayerState {
@@ -100,6 +155,7 @@ export interface PlayerState {
   hp: number;
   maxHp: number;
   xp: number;
+  xpToNext: number;
   level: number;
   facingLeft: boolean;
   aimAngle: number;
@@ -111,7 +167,13 @@ export interface PlayerState {
   retributionBuffTimer: number;
   alive: boolean;
 
-  // Per-player progression state (ready for 4-player co-op)
+  // Co-op downed / revive & status flags
+  downed: boolean;
+  reviveProgressSec: number;
+  revivePct: number;
+  stateFlags: number;
+
+  // Per-player progression state (independent per player in co-op)
   activeSlots: ActiveAbilitySlot[];
   consumedAbilities: Set<AbilityId>;
   ownedSynergies: Set<SynergyId>;
@@ -120,6 +182,10 @@ export interface PlayerState {
   computedStats: ComputedPlayerStats;
   masteryCount: number;
   pendingLevelUps: number;
+  pendingChoiceQueue: PendingChoiceBatch[];
+  /** Number of additional choice batches queued behind the active batch (client `+N` badge). */
+  pendingQueueCount: number;
+  /** Currently active head batch of choices (kept synced with `pendingChoiceQueue[0]?.choices ?? []`). */
   pendingChoices: LevelUpChoice[];
   pendingArtifactChoices: ArtifactDef[];
 }
@@ -129,6 +195,7 @@ export interface EnemyEntity extends SpatialEntity {
   archetypeId: EnemySpriteId;
   bossId?: BossId;
   isBoss: boolean;
+  isElite: boolean;
   x: number;
   y: number;
   vx: number;
@@ -147,12 +214,16 @@ export interface EnemyEntity extends SpatialEntity {
   hitFlashTimer: number;
   slowTimer: number;
   slowFactor: number;
+  chilled: boolean;
   freezeTimer: number;
   stunTimer: number;
   burnTimer: number;
   burnDps: number;
   burnTickTimer: number;
   burnColor: string;
+  tauntTimer: number;
+  tauntTargetId: PlayerId | null;
+  stateFlags: number;
   rangedCooldown: number;
   aiState?: 'normal' | 'windup' | 'lunge';
   aiTimer?: number;
@@ -203,6 +274,8 @@ export interface DamageOptions {
   burnDps?: number;
   burnDuration?: number;
   burnColor?: string;
+  tauntDuration?: number;
+  tauntTargetId?: PlayerId;
   shatterBonus?: boolean;
   silent?: boolean;
 }
@@ -235,6 +308,90 @@ export interface RunStatsSnapshot {
   bossesDefeated: number;
   newBests?: NewBestFlags;
 }
+
+// ============================================================================
+// CO-OP SNAPSHOTS & CLIENT/SERVER PROTOCOL MESSAGES
+// ============================================================================
+
+export interface PlayerSnapshot {
+  id: PlayerId;
+  heroId: HeroId;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  hp: number;
+  maxHp: number;
+  xp: number;
+  xpToNext: number;
+  level: number;
+  facingLeft: boolean;
+  aimAngle: number;
+  alive: boolean;
+  downed: boolean;
+  revivePct: number;
+  invulnTimer: number;
+  stateFlags: number;
+  pendingQueueCount: number;
+}
+
+export interface EnemySnapshot {
+  id: number;
+  archetypeId: EnemySpriteId;
+  bossId?: BossId;
+  isBoss: boolean;
+  isElite: boolean;
+  x: number;
+  y: number;
+  hp: number;
+  maxHp: number;
+  radius: number;
+  facingLeft: boolean;
+  chilled: boolean;
+  tauntTargetId: PlayerId | null;
+  stateFlags: number;
+}
+
+export interface PickupSnapshot {
+  kind: PickupSpriteId;
+  x: number;
+  y: number;
+  value: number;
+}
+
+export interface RoomSnapshot {
+  tick: number;
+  elapsedRunSec: number;
+  mode: RoomMode;
+  paceMode: RoomPaceMode;
+  state: GameState;
+  playerCount: number;
+  enemyCount: number;
+  enemyCap: number;
+  overflowPressure: number;
+  kills: number;
+  bossesDefeated: number;
+  nextBossCountdownSec: number;
+  players: PlayerSnapshot[];
+  enemies: EnemySnapshot[];
+  pickups: PickupSnapshot[];
+  activeBoss: BossActiveInfo | null;
+}
+
+export interface PersonalUpgradePayload {
+  playerId: PlayerId;
+  batchId: number;
+  source: PendingChoiceSource;
+  choices: LevelUpChoice[];
+  pendingQueueCount: number;
+}
+
+export type UpgradeChoiceIndex = 0 | 1 | 2;
+
+export type ClientMessage =
+  | { type: 'INPUT'; input: PlayerInput }
+  | { type: 'PICK_UPGRADE'; choiceIndex: UpgradeChoiceIndex }
+  | { type: 'SET_PACE_MODE'; paceMode: RoomPaceMode };
 
 // ============================================================================
 // BOSS RUNTIME TYPES (SHARED BETWEEN SIM & CLIENT RENDERER)
@@ -419,6 +576,7 @@ export interface ActiveNova {
   chillFactor?: number;
   freezeDuration?: number;
   stunDuration?: number;
+  tauntDuration?: number;
   followPlayer: boolean;
   lifestealOnMultiKill?: boolean;
   killsThisCast: number;
@@ -457,6 +615,7 @@ export interface ActiveMeleeArc {
   age: number;
   maxLife: number;
   hitIds: Set<number>;
+  tauntDuration?: number;
 }
 
 export interface ActiveStrikeOrRain {

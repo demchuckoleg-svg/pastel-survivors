@@ -643,6 +643,28 @@ export class GameEngine {
           break;
         }
 
+        case 'PlayerDowned': {
+          this.spawnRingParticle(ev.x, ev.y, PALETTE.lavenderLight, 72, 0.45);
+          this.spawnFloatingText(ev.x, ev.y - 26, 'DOWNED!', PALETTE.lavender, true);
+          break;
+        }
+
+        case 'PlayerRevived': {
+          this.audio.playLevelUp();
+          this.spawnRingParticle(ev.x, ev.y, PALETTE.mintLight, 96, 0.5);
+          this.spawnParticles(ev.x, ev.y, PALETTE.mint, 16, {
+            speedMin: 60,
+            speedMax: 160,
+          });
+          this.spawnFloatingText(ev.x, ev.y - 30, 'REVIVED!', PALETTE.mint, true);
+          break;
+        }
+
+        case 'EnemyTaunted':
+        case 'UpgradeChoicesQueued':
+        case 'UpgradePicked':
+          break;
+
         case 'GameOverTriggered': {
           const { newBests } = recordRunResult(this.player.heroId, {
             timeSec: ev.snapshot.elapsedRunSec,
@@ -1154,6 +1176,17 @@ export class GameEngine {
         );
       }
 
+      if (e.isElite && !e.isBoss) {
+        ctx.save();
+        ctx.globalAlpha = 0.55;
+        ctx.strokeStyle = PALETTE.butter;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y, e.radius + 4, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
       if (e.freezeTimer > 0) {
         ctx.save();
         ctx.fillStyle = 'rgba(168, 216, 240, 0.45)';
@@ -1164,12 +1197,33 @@ export class GameEngine {
         ctx.fill();
         ctx.stroke();
         ctx.restore();
+      } else if (e.chilled || e.slowTimer > 0) {
+        // Shared chilled debuff visual: translucent pastel ice tint + frost rim
+        ctx.save();
+        ctx.fillStyle = 'rgba(182, 226, 248, 0.32)';
+        ctx.strokeStyle = PALETTE.babyBlueLight;
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y, e.radius + 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
       } else if (e.stunTimer > 0) {
         ctx.save();
         ctx.strokeStyle = PALETTE.butter;
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.arc(screen.x, screen.y - e.radius - 6, 6, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      if (e.tauntTimer > 0 && !e.isBoss) {
+        ctx.save();
+        ctx.strokeStyle = PALETTE.coral;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(screen.x, screen.y - e.radius - 8, 4.5, 0, Math.PI * 2);
         ctx.stroke();
         ctx.restore();
       }

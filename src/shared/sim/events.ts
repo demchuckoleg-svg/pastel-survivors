@@ -11,6 +11,7 @@ import type {
   BossActiveInfo,
   LevelUpChoice,
   ParticleBurstOptions,
+  PendingChoiceSource,
   PlayerId,
   RunStatsSnapshot,
 } from './types';
@@ -57,6 +58,14 @@ export type SimEvent =
       accentColor: string;
     }
   | {
+      type: 'EnemyTaunted';
+      enemyId: number;
+      targetPlayerId: PlayerId;
+      durationSec: number;
+      x: number;
+      y: number;
+    }
+  | {
       type: 'PlayerDamaged';
       playerId: PlayerId;
       x: number;
@@ -70,6 +79,21 @@ export type SimEvent =
       x: number;
       y: number;
       amount: number;
+    }
+  | {
+      type: 'PlayerDowned';
+      playerId: PlayerId;
+      x: number;
+      y: number;
+    }
+  | {
+      type: 'PlayerRevived';
+      playerId: PlayerId;
+      reason: 'circle' | 'boss_kill';
+      reviverIds: PlayerId[];
+      x: number;
+      y: number;
+      hp: number;
     }
   | {
       type: 'PickupCollected';
@@ -87,6 +111,25 @@ export type SimEvent =
       x: number;
       y: number;
       choices: LevelUpChoice[];
+      batchId?: number;
+      pendingQueueCount?: number;
+    }
+  | {
+      type: 'UpgradeChoicesQueued';
+      playerId: PlayerId;
+      batchId: number;
+      source: PendingChoiceSource;
+      choices: LevelUpChoice[];
+      pendingQueueCount: number;
+      isActive: boolean;
+    }
+  | {
+      type: 'UpgradePicked';
+      playerId: PlayerId;
+      choice: LevelUpChoice;
+      remainingQueueCount: number;
+      nextBatchId?: number;
+      nextChoices: LevelUpChoice[];
     }
   | {
       type: 'SynergyEvolved';
@@ -141,9 +184,13 @@ export type SimEvent =
   | {
       type: 'BossChestOpened';
       playerId: PlayerId;
+      openedByPlayerId?: PlayerId;
       x: number;
       y: number;
       choices: ArtifactDef[];
+      upgradeChoices?: LevelUpChoice[];
+      batchId?: number;
+      pendingQueueCount?: number;
     }
   | {
       type: 'VfxBurst';
