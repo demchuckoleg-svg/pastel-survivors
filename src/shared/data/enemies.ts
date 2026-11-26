@@ -11,7 +11,7 @@ export const ENEMIES: Record<EnemySpriteId, EnemyArchetypeDef> = {
     name: 'Mochi Slime',
     spriteId: 'slime',
     behavior: 'chase_fast',
-    baseHp: 29,
+    baseHp: 18,
     baseXp: 4,
     speed: 74,
     damage: 8,
@@ -27,7 +27,7 @@ export const ENEMIES: Record<EnemySpriteId, EnemyArchetypeDef> = {
     name: 'Porcelain Golem',
     spriteId: 'golem',
     behavior: 'chase_tank',
-    baseHp: 94,
+    baseHp: 76,
     baseXp: 11,
     speed: 44,
     damage: 16,
@@ -43,7 +43,7 @@ export const ENEMIES: Record<EnemySpriteId, EnemyArchetypeDef> = {
     name: 'Wisteria Wisp',
     spriteId: 'wisp',
     behavior: 'ranged_kiter',
-    baseHp: 42,
+    baseHp: 34,
     baseXp: 8,
     speed: 60,
     damage: 11,
@@ -62,7 +62,7 @@ export const ENEMIES: Record<EnemySpriteId, EnemyArchetypeDef> = {
     name: 'Mini Mochi',
     spriteId: 'minislime',
     behavior: 'swarm_mini',
-    baseHp: 16,
+    baseHp: 11,
     baseXp: 2,
     speed: 92,
     damage: 6,
@@ -367,19 +367,20 @@ export function xpNeeded(level: number): number {
 
 /**
  * Scaled solo enemy HP at elapsed time `t` (in minutes).
- * Accelerates exponentially past minutes 10, 18, and 25.
+ * Gentle through early game (0-10m), then steepens sharply past Boss 1 (10m)
+ * and accelerates exponentially past minutes 18 and 25.
  */
 export function enemyHP(baseHP: number, t: number): number {
   const minutes = Math.max(0, t);
-  let mult = 1 + 0.18 * minutes + 0.03 * minutes * minutes;
+  let mult = 1 + 0.12 * minutes + 0.015 * minutes * minutes;
   if (minutes > 10) {
-    mult *= Math.pow(1.065, minutes - 10);
+    mult *= Math.pow(1.16, minutes - 10);
   }
   if (minutes > 18) {
-    mult *= Math.pow(1.06, minutes - 18);
+    mult *= Math.pow(1.05, minutes - 18);
   }
   if (minutes > 25) {
-    mult *= Math.pow(1.06, minutes - 25);
+    mult *= Math.pow(1.05, minutes - 25);
   }
   return baseHP * mult;
 }
