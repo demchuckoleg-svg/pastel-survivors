@@ -11,7 +11,7 @@ export const ENEMIES: Record<EnemySpriteId, EnemyArchetypeDef> = {
     name: 'Mochi Slime',
     spriteId: 'slime',
     behavior: 'chase_fast',
-    baseHp: 22,
+    baseHp: 29,
     baseXp: 4,
     speed: 74,
     damage: 8,
@@ -27,7 +27,7 @@ export const ENEMIES: Record<EnemySpriteId, EnemyArchetypeDef> = {
     name: 'Porcelain Golem',
     spriteId: 'golem',
     behavior: 'chase_tank',
-    baseHp: 72,
+    baseHp: 94,
     baseXp: 11,
     speed: 44,
     damage: 16,
@@ -43,7 +43,7 @@ export const ENEMIES: Record<EnemySpriteId, EnemyArchetypeDef> = {
     name: 'Wisteria Wisp',
     spriteId: 'wisp',
     behavior: 'ranged_kiter',
-    baseHp: 32,
+    baseHp: 42,
     baseXp: 8,
     speed: 60,
     damage: 11,
@@ -62,7 +62,7 @@ export const ENEMIES: Record<EnemySpriteId, EnemyArchetypeDef> = {
     name: 'Mini Mochi',
     spriteId: 'minislime',
     behavior: 'swarm_mini',
-    baseHp: 12,
+    baseHp: 16,
     baseXp: 2,
     speed: 92,
     damage: 6,
@@ -91,7 +91,7 @@ export const BOSSES: Record<BossId, BossDef> = {
     title: 'Sovereign of Softness',
     spriteId: 'king_mochi',
     spawnMinute: 10,
-    baseHp: 1400,
+    baseHp: 2600,
     baseXp: 180,
     speed: 62,
     contactDamage: 22,
@@ -132,7 +132,7 @@ export const BOSSES: Record<BossId, BossDef> = {
     title: 'Empress of Dusk Petals',
     spriteId: 'lady_wisteria',
     spawnMinute: 20,
-    baseHp: 2200,
+    baseHp: 5800,
     baseXp: 260,
     speed: 78,
     contactDamage: 26,
@@ -173,7 +173,7 @@ export const BOSSES: Record<BossId, BossDef> = {
     title: 'The Porcelain Warden',
     spriteId: 'aegis',
     spawnMinute: 30,
-    baseHp: 3200,
+    baseHp: 7200,
     baseXp: 360,
     speed: 68,
     contactDamage: 32,
@@ -214,7 +214,7 @@ export const BOSSES: Record<BossId, BossDef> = {
     title: 'Mint & Rose Patisserie Duo',
     spriteId: 'twin_macaron_mint',
     spawnMinute: 15,
-    baseHp: 1850,
+    baseHp: 5400,
     baseXp: 230,
     speed: 74,
     contactDamage: 24,
@@ -247,7 +247,7 @@ export const BOSSES: Record<BossId, BossDef> = {
     title: 'Mint & Rose Patisserie Duo',
     spriteId: 'twin_macaron_rose',
     spawnMinute: 15,
-    baseHp: 1850,
+    baseHp: 5400,
     baseXp: 230,
     speed: 70,
     contactDamage: 20,
@@ -280,7 +280,7 @@ export const BOSSES: Record<BossId, BossDef> = {
     title: 'Matriarch of Velvet Layers',
     spriteId: 'countess_tiramisu',
     spawnMinute: 25,
-    baseHp: 2700,
+    baseHp: 6800,
     baseXp: 310,
     speed: 66,
     contactDamage: 28,
@@ -353,20 +353,35 @@ export function getBossForEncounter(encounterIndex: number): BossDef {
 
 /**
  * XP required to advance from `level` to `level + 1`.
- * Exact formula: Math.floor(10 + level * 8 + Math.pow(level, 1.5) * 4)
+ * Steepens past Level 30 so 20:00 lands around Lv 45-55 and 32:00 around Lv 70-85.
  */
 export function xpNeeded(level: number): number {
   const lv = Math.max(1, Math.floor(level));
-  return Math.floor(10 + lv * 8 + Math.pow(lv, 1.5) * 4);
+  const base = 10 + lv * 8 + Math.pow(lv, 1.5) * 4;
+  if (lv <= 30) {
+    return Math.floor(base);
+  }
+  const ex = lv - 30;
+  return Math.floor(base + ex * ex * 10 + Math.pow(ex, 2.55) * 1.5);
 }
 
 /**
  * Scaled solo enemy HP at elapsed time `t` (in minutes).
- * Exact formula: baseHP * (1 + 0.18 * t + 0.03 * t * t)
+ * Accelerates exponentially past minutes 10, 18, and 25.
  */
 export function enemyHP(baseHP: number, t: number): number {
   const minutes = Math.max(0, t);
-  return baseHP * (1 + 0.18 * minutes + 0.03 * minutes * minutes);
+  let mult = 1 + 0.18 * minutes + 0.03 * minutes * minutes;
+  if (minutes > 10) {
+    mult *= Math.pow(1.065, minutes - 10);
+  }
+  if (minutes > 18) {
+    mult *= Math.pow(1.06, minutes - 18);
+  }
+  if (minutes > 25) {
+    mult *= Math.pow(1.06, minutes - 25);
+  }
+  return baseHP * mult;
 }
 
 /**
@@ -383,7 +398,7 @@ export function enemyXP(baseXP: number, t: number): number {
  */
 export function enemySpawnRate(t: number): number {
   const minutes = Math.max(0, t);
-  return Math.min(9.5, 1.2 + minutes * 0.28 + Math.pow(minutes, 1.15) * 0.05);
+  return Math.min(18.0, 1.3 + minutes * 0.42 + Math.pow(minutes, 1.25) * 0.12);
 }
 
 // ============================================================================
@@ -396,10 +411,10 @@ export function coopEnemyHpMultiplier(playerCount: number): number {
   return 1 + 0.65 * (p - 1);
 }
 
-/** Boss HP multiplier for `P` players: `1 + 0.85 * (P - 1)`. */
+/** Boss HP multiplier for `P` players: `1 + 1.25 * (P - 1)`. */
 export function coopBossHpMultiplier(playerCount: number): number {
   const p = Math.max(1, Math.floor(playerCount));
-  return 1 + 0.85 * (p - 1);
+  return 1 + 1.25 * (p - 1);
 }
 
 /** Spawn Rate multiplier for `P` players: `1 + 0.45 * (P - 1)`. */

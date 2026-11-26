@@ -82,15 +82,15 @@ export function buildComputedStats(player: Pick<
     critChance: Math.min(0.95, base.critChance + critChanceBonus + starlightCritBonus),
     critMultiplier: base.critMultiplier + critMultBonus,
     hpRegen: base.hpRegen + hpRegenBonus + totemRegenBonus,
-    damageMult: 1 + damageMultBonus + retributionBonus,
+    damageMult: 0.85 + damageMultBonus * 0.8 + retributionBonus,
     cooldownMult: Math.max(
-      0.25,
-      1 - (cooldownReduction + hasteCdBonus + starlightCdBonus + sharedCdBonus)
+      0.42,
+      1.18 - (cooldownReduction * 0.8 + hasteCdBonus + starlightCdBonus + sharedCdBonus)
     ),
     areaMult: 1 + areaMultBonus,
     xpGainMult: 1 + xpGainMultBonus,
     knockbackMult: 1 + knockbackMultBonus,
-    projectileBonus: Math.round(projectileBonus),
+    projectileBonus: Math.min(1, Math.round(projectileBonus * 0.8)),
     pierceBonus: Math.round(pierceBonus),
     hasDoubleCast: player.ownedArtifacts.includes('aether_chronometer'),
     hasRetributionAegis: player.ownedArtifacts.includes('retribution_aegis'),
@@ -235,12 +235,12 @@ export const ENDLESS_MASTERY_CARDS: readonly LevelUpChoice[] = [
     tier: 'standard',
     iconId: 'ascended_relic',
     shortTitle: 'Pastel Might',
-    shortTag: 'ALL +10% DMG',
+    shortTag: 'ALL +4% DMG',
     title: 'Pastel Might',
     subtitle: 'ENDLESS MASTERY',
-    description: '+10% All Damage permanently.',
+    description: '+4% All Damage permanently (diminishing).',
     color: PALETTE.coral,
-    masteryModifiers: { damageMult: 0.1 },
+    masteryModifiers: { damageMult: 0.04 },
   },
   {
     kind: 'mastery',
@@ -248,12 +248,12 @@ export const ENDLESS_MASTERY_CARDS: readonly LevelUpChoice[] = [
     tier: 'standard',
     iconId: 'ascended_relic',
     shortTitle: 'Pastel Haste',
-    shortTag: 'ALL -6% CD',
+    shortTag: 'ALL -2% CD',
     title: 'Pastel Haste',
     subtitle: 'ENDLESS MASTERY',
-    description: '-6% All Cooldowns & +5% Move Speed permanently.',
+    description: '-2% All Cooldowns & +2% Move Speed permanently (diminishing).',
     color: PALETTE.babyBlue,
-    masteryModifiers: { cooldownReduction: 0.06, moveSpeedMult: 0.05 },
+    masteryModifiers: { cooldownReduction: 0.02, moveSpeedMult: 0.02 },
   },
   {
     kind: 'mastery',
@@ -261,15 +261,50 @@ export const ENDLESS_MASTERY_CARDS: readonly LevelUpChoice[] = [
     tier: 'standard',
     iconId: 'ascended_relic',
     shortTitle: 'Pastel Vitality',
-    shortTag: '+25 HP +HEAL',
+    shortTag: '+10 HP +HEAL',
     title: 'Pastel Vitality',
     subtitle: 'ENDLESS MASTERY',
-    description: '+25 Max HP, +0.5 HP/s Regen, and heal 35 HP.',
+    description: '+10 Max HP, +0.2 HP/s Regen, and heal 20 HP (diminishing).',
     color: PALETTE.mint,
-    masteryModifiers: { maxHpFlat: 25, hpRegen: 0.5 },
-    masteryHeal: 35,
+    masteryModifiers: { maxHpFlat: 10, hpRegen: 0.2 },
+    masteryHeal: 20,
   },
 ];
+
+function buildDiminishingMasteryCards(masteryCount: number): LevelUpChoice[] {
+  const diminish = Math.max(0.2, 1 / (1 + Math.max(0, masteryCount) * 0.15));
+  const dmg = Math.max(0.008, Math.round(0.04 * diminish * 1000) / 1000);
+  const dmgPct = +(dmg * 100).toFixed(1);
+  const cd = Math.max(0.004, Math.round(0.02 * diminish * 1000) / 1000);
+  const cdPct = +(cd * 100).toFixed(1);
+  const spd = Math.max(0.004, Math.round(0.02 * diminish * 1000) / 1000);
+  const spdPct = +(spd * 100).toFixed(1);
+  const hp = Math.max(2, Math.round(10 * diminish));
+  const regen = Math.max(0.1, Math.round(0.2 * diminish * 10) / 10);
+  const heal = Math.max(10, Math.round(20 * diminish));
+
+  return [
+    {
+      ...ENDLESS_MASTERY_CARDS[0],
+      shortTag: `ALL +${dmgPct}% DMG`,
+      description: `+${dmgPct}% All Damage permanently (diminishing).`,
+      masteryModifiers: { damageMult: dmg },
+    },
+    {
+      ...ENDLESS_MASTERY_CARDS[1],
+      shortTag: `ALL -${cdPct}% CD`,
+      description: `-${cdPct}% All Cooldowns & +${spdPct}% Move Speed permanently (diminishing).`,
+      masteryModifiers: { cooldownReduction: cd, moveSpeedMult: spd },
+    },
+    {
+      ...ENDLESS_MASTERY_CARDS[2],
+      shortTag: `+${hp} HP +HEAL`,
+      description: `+${hp} Max HP, +${regen} HP/s Regen, and heal ${heal} HP (diminishing).`,
+      masteryModifiers: { maxHpFlat: hp, hpRegen: regen },
+      masteryHeal: heal,
+    },
+  ];
+}
 
 /**
  * Pure upgrade-roll logic: generates up to `count` level-up choice cards for a player,
@@ -375,10 +410,13 @@ export function generateLevelUpChoicesForPlayer(
     if (next) choices.push(next);
   }
 
-  // 3. Endless Mastery fallback cards when all 6 slots are maxed
-  let mIdx = 0;
-  while (choices.length < count && mIdx < ENDLESS_MASTERY_CARDS.length) {
-    choices.push(ENDLESS_MASTERY_CARDS[mIdx++]);
+  // 3. Endless Mastery fallback cards when all 6 slots are maxed (diminishing returns)
+  if (choices.length < count) {
+    const masteryCards = buildDiminishingMasteryCards(player.masteryCount);
+    let mIdx = 0;
+    while (choices.length < count && mIdx < masteryCards.length) {
+      choices.push(masteryCards[mIdx++]);
+    }
   }
 
   return choices;

@@ -1,4 +1,4 @@
-import { BOSS_ORDER, BOSSES, enemyHP } from '../data/enemies';
+import { BOSS_ORDER, BOSSES } from '../data/enemies';
 import { PALETTE } from '../data/palette';
 import type { BossAttackSpec, BossDef, BossId, EnemySpriteId } from '../data/types';
 import type {
@@ -131,7 +131,8 @@ export function getBossCycle(encounterIndex: number): number {
 }
 
 /**
- * Scales Boss HP using the exact enemyHP(baseHP, t) curve plus a +35% bonus per full 30-min cycle.
+ * Scales Boss HP with a dedicated steeper time curve (accelerating past 10m)
+ * plus a +35% bonus per full 5-boss cycle.
  */
 export function getBossScaledHp(
   bossDef: BossDef,
@@ -139,7 +140,12 @@ export function getBossScaledHp(
   encounterIndex: number
 ): number {
   const cycle = getBossCycle(encounterIndex);
-  const baseScaled = enemyHP(bossDef.baseHp, Math.max(0, elapsedMinutes));
+  const m = Math.max(0, elapsedMinutes);
+  let timeMult = 1 + 0.22 * m + 0.035 * m * m;
+  if (m > 10) {
+    timeMult *= Math.pow(1.06, m - 10);
+  }
+  const baseScaled = bossDef.baseHp * timeMult;
   return Math.round(baseScaled * (1 + cycle * 0.35));
 }
 

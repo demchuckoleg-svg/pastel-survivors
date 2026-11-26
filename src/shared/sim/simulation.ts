@@ -80,7 +80,7 @@ import {
 
 export const DEFAULT_LOCAL_PLAYER_ID: PlayerId = 'local';
 export const MAX_PLAYERS = 4;
-export const MAX_ENEMIES = 350;
+export const MAX_ENEMIES = 650;
 export const MAX_PICKUPS = 400;
 
 export const REVIVE_CIRCLE_RADIUS = 72;
@@ -919,13 +919,14 @@ export class GameSimulation {
       this.acquireOrUpgradeAbility(choice.abilityId, p.id);
     } else if (choice.kind === 'mastery' && choice.masteryModifiers) {
       p.masteryCount++;
+      const { projectileBonus: _ignoredProj, ...safeMasteryMods } = choice.masteryModifiers;
       this.recordGlobalPassive(p, {
         id: `${choice.masteryId ?? 'mastery'}_${p.masteryCount}`,
         sourceType: 'mastery',
         sourceId: choice.masteryId ?? 'mastery',
         sourceName: choice.title,
         label: choice.description,
-        modifiers: choice.masteryModifiers,
+        modifiers: safeMasteryMods,
       });
       this.recomputeStats(p, true);
       if (choice.masteryHeal) {
@@ -2168,7 +2169,7 @@ export class GameSimulation {
     if (!bossActive && this.elapsedRunSec >= this.nextSwarmWaveSec) {
       this.nextSwarmWaveSec += 50;
       const anchor = alivePlayers[Math.floor(this.rng.next() * alivePlayers.length)];
-      const packSize = Math.min(24, Math.round((6 + Math.floor(minutes * 1.4)) * (1 + 0.25 * (playerCount - 1))));
+      const packSize = Math.min(48, Math.round((7 + Math.floor(minutes * 2.4)) * (1 + 0.35 * (playerCount - 1))));
       const baseAngle = this.rng.next() * Math.PI * 2;
       const arcSpan = Math.min(Math.PI * 1.2, 0.7 + minutes * 0.06);
 

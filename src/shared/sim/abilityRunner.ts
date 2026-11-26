@@ -401,7 +401,7 @@ export class AbilityRunner {
     const damage = stats.damage * ctx.stats.damageMult;
     const area = stats.area * ctx.stats.areaMult;
     const kb = (stats.knockback ?? 0) * ctx.stats.knockbackMult;
-    const count = Math.max(1, stats.count + ctx.stats.projectileBonus);
+    const count = Math.max(1, stats.count + Math.min(1, Math.max(0, ctx.stats.projectileBonus)));
     const pierce = stats.pierce >= 999 ? 999 : stats.pierce + ctx.stats.pierceBonus;
 
     switch (id) {
@@ -1614,7 +1614,7 @@ export class AbilityRunner {
     const damage = stats.damage * ctx.stats.damageMult;
     const area = stats.area * ctx.stats.areaMult;
     const kb = (stats.knockback ?? 0) * ctx.stats.knockbackMult;
-    const count = Math.max(1, stats.count + ctx.stats.projectileBonus);
+    const count = Math.max(1, stats.count + Math.min(1, Math.max(0, ctx.stats.projectileBonus)));
     const pierce = stats.pierce >= 999 ? 999 : stats.pierce + ctx.stats.pierceBonus;
 
     switch (id) {
