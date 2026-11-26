@@ -12,6 +12,7 @@ import {
   GameSimulation,
   MAX_ENEMIES,
   REVIVE_CIRCLE_RADIUS,
+  REVIVE_DURATION_SEC,
   REVIVE_HP_RATIO,
 } from '../shared/sim/simulation';
 import {
@@ -429,9 +430,12 @@ runTest('Player-count scaling (1P vs 4P), 350 enemy cap overflow, and Standard v
 });
 
 // ============================================================================
-// TEST 4: Downed State, 10s Cumulative Revive Circle, Boss Auto-Revive, Game Over
+// TEST 4: Downed State, 3.0s Cumulative Revive Circle, Boss Auto-Revive, Game Over
 // ============================================================================
-runTest('Downed state -> 10.0s cumulative revive circle, boss kill auto-revive, and all-downed Game Over', () => {
+runTest('Downed state -> 3.0s cumulative revive circle, boss kill auto-revive, and all-downed Game Over', () => {
+  assert.equal(REVIVE_DURATION_SEC, 3.0, 'Revive circle duration must be 3.0s');
+  assert.equal(REVIVE_HP_RATIO, 0.5, 'Revive circle must restore 50% HP');
+
   const room = new CoopRoom({ roomId: 'revive-test', seed: 707 });
   room.addPlayer('p1', 'mage');
   room.addPlayer('p2', 'knight');
@@ -462,23 +466,23 @@ runTest('Downed state -> 10.0s cumulative revive circle, boss kill auto-revive, 
   assert.ok(p1.x > 0 && p1.x < p1.speed * 0.1, 'Downed Pastel Ghost should drift slowly');
   room.setPlayerInput('p1', IDLE_INPUT);
 
-  // Move P2 inside P1's revive circle for 4.0 seconds
+  // Move P2 inside P1's revive circle for 1.2 seconds (40% of 3.0s)
   p2.x = p1.x + REVIVE_CIRCLE_RADIUS * 0.5;
   p2.y = p1.y;
   let lastSnap = room.getSnapshot();
-  for (let i = 0; i < 40; i++) {
+  for (let i = 0; i < 12; i++) {
     lastSnap = room.step(0.1).snapshot;
   }
   const midP1 = lastSnap.players.find((pl) => pl.id === 'p1')!;
-  assert.equal(p1.downed, true, 'P1 should still be downed at 4.0s');
+  assert.equal(p1.downed, true, 'P1 should still be downed at 1.2s');
   assert.ok(
     Math.abs(midP1.revivePct - 0.4) < 0.02,
-    `Snapshot revivePct should be ~0.40 after 4.0s (got ${midP1.revivePct})`
+    `Snapshot revivePct should be ~0.40 after 1.2s (got ${midP1.revivePct})`
   );
 
-  // Step P2 OUTSIDE circle for 2.0 seconds -> cumulative progress MUST be preserved
+  // Step P2 OUTSIDE circle for 1.0 second -> cumulative progress MUST be preserved
   p2.x = p1.x + REVIVE_CIRCLE_RADIUS + 80;
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 10; i++) {
     lastSnap = room.step(0.1).snapshot;
   }
   const pausedP1 = lastSnap.players.find((pl) => pl.id === 'p1')!;
@@ -487,23 +491,23 @@ runTest('Downed state -> 10.0s cumulative revive circle, boss kill auto-revive, 
     `Cumulative revivePct must not decay when ally steps out (got ${pausedP1.revivePct})`
   );
 
-  // Step P2 back INSIDE circle for 6.0 more seconds -> revives at 10.0s cumulative!
+  // Step P2 back INSIDE circle for 1.8 more seconds -> revives at 3.0s cumulative!
   p2.x = p1.x + 10;
   p2.y = p1.y;
   let revivedEventFound = false;
-  for (let i = 0; i < 60; i++) {
+  for (let i = 0; i < 18; i++) {
     const tick = room.step(0.1);
     if (tick.events.some((e) => e.type === 'PlayerRevived' && e.playerId === 'p1' && e.reason === 'circle')) {
       revivedEventFound = true;
     }
   }
-  assert.ok(revivedEventFound, 'PlayerRevived (circle) event must fire at 10.0s');
+  assert.ok(revivedEventFound, 'PlayerRevived (circle) event must fire at 3.0s');
   assert.equal(p1.downed, false, 'P1 must be revived');
   assert.equal(p1.alive, true, 'P1 must be alive again');
   assert.equal(
     Math.round(p1.hp),
     Math.max(1, Math.round(p1.maxHp * REVIVE_HP_RATIO)),
-    'Revived player should restore to 20% HP'
+    'Revived player should restore to 50% HP'
   );
   assert.ok(p1.invulnTimer >= 1.8, `Revived player must have 2s invulnerability (got ${p1.invulnTimer})`);
   assert.equal(p1.revivePct, 0, 'revivePct resets to 0 after revive');

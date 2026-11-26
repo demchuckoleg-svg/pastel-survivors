@@ -84,8 +84,8 @@ export const MAX_ENEMIES = 350;
 export const MAX_PICKUPS = 400;
 
 export const REVIVE_CIRCLE_RADIUS = 72;
-export const REVIVE_DURATION_SEC = 10.0;
-export const REVIVE_HP_RATIO = 0.2;
+export const REVIVE_DURATION_SEC = 3.0;
+export const REVIVE_HP_RATIO = 0.5;
 export const BOSS_KILL_REVIVE_HP_RATIO = 0.5;
 export const REVIVE_INVULN_SEC = 2.0;
 export const GHOST_DRIFT_SPEED_MULT = 0.35;
@@ -1770,8 +1770,8 @@ export class GameSimulation {
 
   /**
    * Standing inside a downed ally's revive circle accumulates progress toward
-   * 10.0 cumulative seconds (does NOT reset when stepping out to dodge).
-   * Reaching 10.0s revives the ally at 20% HP with 2.0s of invulnerability.
+   * 3.0 cumulative seconds (does NOT reset when stepping out to dodge).
+   * Reaching 3.0s revives the ally at 50% HP with 2.0s of invulnerability.
    */
   private updateReviveCircles(dt: number): void {
     const reviveRadiusSq = REVIVE_CIRCLE_RADIUS * REVIVE_CIRCLE_RADIUS;
