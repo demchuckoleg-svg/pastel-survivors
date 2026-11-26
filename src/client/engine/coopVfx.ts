@@ -566,22 +566,41 @@ export class CoopVfxSystem {
       }
 
       case 'beam': {
-        const count = Math.min(2, stats?.count ?? 1);
-        const width = Math.max(12, Math.min(34, (stats?.area ?? 20) * 0.7));
+        const isSpear = ev.abilityId === 'spear_thrust';
+        const count = Math.min(isSpear ? 2 : 4, Math.max(1, stats?.count ?? 1));
+        const width = Math.max(12, Math.min(34, (stats?.area ?? 20) * 0.75));
+        const length = isSpear
+          ? 175
+          : ev.abilityId === 'starlight_railgun'
+          ? 1620
+          : ev.abilityId === 'tempest_lance'
+          ? 1540
+          : ev.abilityId === 'piercing_rail_bow'
+          ? 1400
+          : 1250;
+        const spreadStep =
+          ev.abilityId === 'tempest_lance'
+            ? 0.24
+            : ev.abilityId === 'starlight_railgun'
+            ? 0.13
+            : ev.abilityId === 'piercing_rail_bow'
+            ? 0.14
+            : 0.18;
+
         for (let i = 0; i < count; i++) {
-          const offset = count === 2 ? (i === 0 ? -0.1 : 0.1) : 0;
+          const offset = count === 1 ? 0 : (i - (count - 1) / 2) * spreadStep;
           this.beams.push({
             ownerSlotId,
             x: originX,
             y: originY,
             angle: aimAngle + offset,
-            length: ev.abilityId === 'spear_thrust' ? 165 : 460,
+            length,
             width,
             color,
             coreColor: PALETTE.white,
-            spriteId: ev.abilityId === 'spear_thrust' ? 'spear' : undefined,
+            spriteId: isSpear ? 'spear' : undefined,
             age: 0,
-            maxLife: 0.28,
+            maxLife: isSpear ? 0.22 : 0.34,
           });
         }
         break;

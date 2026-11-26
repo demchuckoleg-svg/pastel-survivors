@@ -546,7 +546,7 @@ export class AbilityRunner {
 
       case 'plasma_beam': {
         const beamCount = Math.min(5, count);
-        const beamLength = Math.max(540, Math.hypot(ctx.viewportWidth, ctx.viewportHeight) * 0.62);
+        const beamLength = Math.max(1150, Math.hypot(ctx.viewportWidth, ctx.viewportHeight) * 0.85);
         for (let i = 0; i < beamCount; i++) {
           let angle = baseAngle;
           if (beamCount === 2) {
@@ -787,7 +787,7 @@ export class AbilityRunner {
 
       case 'piercing_rail_bow': {
         const beamCount = Math.min(4, count);
-        const railLength = Math.max(760, Math.hypot(ctx.viewportWidth, ctx.viewportHeight) * 0.85);
+        const railLength = Math.max(1350, Math.hypot(ctx.viewportWidth, ctx.viewportHeight) * 0.95);
         for (let i = 0; i < beamCount; i++) {
           const angle =
             beamCount === 1
@@ -1720,7 +1720,7 @@ export class AbilityRunner {
       case 'tempest_lance': {
         // Dual high-voltage screen-wide beams + chain_arc_on_hit + crit_surge
         const beamCount = Math.min(4, count);
-        const beamLength = Math.max(840, Math.hypot(ctx.viewportWidth, ctx.viewportHeight) * 0.95);
+        const beamLength = Math.max(1500, Math.hypot(ctx.viewportWidth, ctx.viewportHeight) * 1.05);
         for (let i = 0; i < beamCount; i++) {
           const angle =
             beamCount === 1
@@ -1851,7 +1851,7 @@ export class AbilityRunner {
       case 'starlight_railgun': {
         // 3 synchronized screen-wide starlight beams + bonus_crit_mult + starlight_afterglow
         const beamCount = Math.min(5, count);
-        const railLength = Math.max(880, Math.hypot(ctx.viewportWidth, ctx.viewportHeight) * 1.0);
+        const railLength = Math.max(1600, Math.hypot(ctx.viewportWidth, ctx.viewportHeight) * 1.1);
         for (let i = 0; i < beamCount; i++) {
           const angle =
             beamCount === 1
