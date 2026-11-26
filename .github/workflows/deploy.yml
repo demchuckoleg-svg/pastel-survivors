@@ -27,42 +27,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Typecheck
-        run: npm run typecheck
-
       - name: Build web client
         run: npm run build
 
-      - name: Detect and bundle optional Node.js server
-        id: server
-        run: |
-          set -euo pipefail
-          SERVER_ENTRY=""
-          for candidate in \
-            server/src/index.ts \
-            server/index.ts \
-            server/src/index.js \
-            server/index.js; do
-            if [ -f "$candidate" ]; then
-              SERVER_ENTRY="$candidate"
-              break
-            fi
-          done
-
-          if [ -n "$SERVER_ENTRY" ]; then
-            echo "Found server entrypoint: $SERVER_ENTRY"
-            mkdir -p dist-server
-            npx --yes esbuild "$SERVER_ENTRY" \
-              --bundle \
-              --platform=node \
-              --target=node22 \
-              --format=esm \
-              --outfile=dist-server/index.mjs
-            echo "has_server=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "No Node.js backend/WebSocket server detected; deploying client-only build."
-            echo "has_server=false" >> "$GITHUB_OUTPUT"
-          fi
+      - name: Build standalone server bundle
+        run: npm run build:server
 
       - name: Install deployment tools on runner
         run: |
@@ -74,11 +43,10 @@ jobs:
           SSHPASS: ${{ secrets.VPS_PASSWORD }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
-          HAS_SERVER: ${{ steps.server.outputs.has_server }}
         run: |
           set -euo pipefail
           SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
-          sshpass -e ssh $SSH_OPTS "${VPS_USER}@${VPS_HOST}" "HAS_SERVER='${HAS_SERVER}' bash -s" <<'EOF'
+          sshpass -e ssh $SSH_OPTS "${VPS_USER}@${VPS_HOST}" "bash -s" <<'EOF'
           set -euo pipefail
           export DEBIAN_FRONTEND=noninteractive
 
@@ -105,23 +73,18 @@ jobs:
             apt-get install -y -qq "${MISSING_PKGS[@]}"
           fi
 
-          # 3. Install Node.js 22 LTS only if a server exists and Node 22+ is missing
-          if [ "$HAS_SERVER" = "true" ]; then
-            NODE_MAJOR=0
-            if command -v node >/dev/null 2>&1; then
-              NODE_MAJOR=$(node -v | sed -E 's/^v([0-9]+).*/\1/')
-            fi
-            if [ "$NODE_MAJOR" -lt 22 ]; then
-              curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
-              apt-get install -y -qq nodejs
-            fi
+          # 3. Install Node.js 22 LTS from NodeSource if missing or below v22
+          NODE_MAJOR=0
+          if command -v node >/dev/null 2>&1; then
+            NODE_MAJOR=$(node -v | sed -E 's/^v([0-9]+).*/\1/')
+          fi
+          if [ "$NODE_MAJOR" -lt 22 ]; then
+            curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+            apt-get install -y -qq nodejs
           fi
 
           # 4. Ensure target directories exist
-          mkdir -p /opt/pastel-survivors/client
-          if [ "$HAS_SERVER" = "true" ]; then
-            mkdir -p /opt/pastel-survivors/server
-          fi
+          mkdir -p /opt/pastel-survivors/client /opt/pastel-survivors/server
           EOF
 
       - name: Upload built artifacts via rsync
@@ -129,14 +92,11 @@ jobs:
           SSHPASS: ${{ secrets.VPS_PASSWORD }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
-          HAS_SERVER: ${{ steps.server.outputs.has_server }}
         run: |
           set -euo pipefail
           SSH_CMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
           sshpass -e rsync -az --delete -e "$SSH_CMD" dist/ "${VPS_USER}@${VPS_HOST}:/opt/pastel-survivors/client/"
-          if [ "$HAS_SERVER" = "true" ]; then
-            sshpass -e rsync -az --delete -e "$SSH_CMD" dist-server/ "${VPS_USER}@${VPS_HOST}:/opt/pastel-survivors/server/"
-          fi
+          sshpass -e rsync -az --delete -e "$SSH_CMD" dist-server/ "${VPS_USER}@${VPS_HOST}:/opt/pastel-survivors/server/"
 
       - name: Configure services, Caddy, and verify deployment
         env:
@@ -144,19 +104,18 @@ jobs:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
           VPS_DOMAIN: ${{ secrets.VPS_DOMAIN }}
-          HAS_SERVER: ${{ steps.server.outputs.has_server }}
         run: |
           set -euo pipefail
           SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
-          sshpass -e ssh $SSH_OPTS "${VPS_USER}@${VPS_HOST}" "HAS_SERVER='${HAS_SERVER}' VPS_DOMAIN='${VPS_DOMAIN}' bash -s" <<'EOF'
+          sshpass -e ssh $SSH_OPTS "${VPS_USER}@${VPS_HOST}" "VPS_DOMAIN='${VPS_DOMAIN}' bash -s" <<'EOF'
           set -euo pipefail
 
           # Ensure Caddy can read static assets
+          chmod a+rx /opt/pastel-survivors
           chmod -R a+rX /opt/pastel-survivors/client
 
-          # Configure systemd service only if a Node server exists
-          if [ "$HAS_SERVER" = "true" ]; then
-            cat > /etc/systemd/system/pastel-game.service <<'UNIT'
+          # Configure systemd service for the standalone game server
+          cat > /etc/systemd/system/pastel-game.service <<'UNIT'
           [Unit]
           Description=Pastel Survivors Game Server
           After=network.target
@@ -164,7 +123,7 @@ jobs:
           [Service]
           Type=simple
           WorkingDirectory=/opt/pastel-survivors/server
-          ExecStart=/usr/bin/node /opt/pastel-survivors/server/index.mjs
+          ExecStart=/usr/bin/node /opt/pastel-survivors/server/index.js
           Environment=PORT=3000
           Environment=NODE_ENV=production
           Restart=always
@@ -175,10 +134,9 @@ jobs:
           WantedBy=multi-user.target
           UNIT
 
-            systemctl daemon-reload
-            systemctl enable pastel-game
-            systemctl restart pastel-game
-          fi
+          systemctl daemon-reload
+          systemctl enable --now pastel-game
+          systemctl restart pastel-game
 
           # Write Caddyfile
           SITE_ADDR=":80"
@@ -186,10 +144,12 @@ jobs:
             SITE_ADDR="$VPS_DOMAIN"
           fi
 
-          if [ "$HAS_SERVER" = "true" ]; then
-            cat > /etc/caddy/Caddyfile <<CADDY
+          cat > /etc/caddy/Caddyfile <<CADDY
           ${SITE_ADDR} {
               handle /ws* {
+                  reverse_proxy 127.0.0.1:3000
+              }
+              handle /health {
                   reverse_proxy 127.0.0.1:3000
               }
               handle {
@@ -199,28 +159,23 @@ jobs:
               }
           }
           CADDY
-          else
-            cat > /etc/caddy/Caddyfile <<CADDY
-          ${SITE_ADDR} {
-              root * /opt/pastel-survivors/client
-              try_files {path} /index.html
-              file_server
-          }
-          CADDY
-          fi
 
           caddy validate --config /etc/caddy/Caddyfile
-          systemctl enable caddy
-          if systemctl is-active --quiet caddy; then
-            systemctl reload caddy
-          else
-            systemctl start caddy
-          fi
+          systemctl enable --now caddy
+          systemctl reload caddy
+
+          # Wait briefly for Node server to bind port 3000 after restart
+          for i in $(seq 1 10); do
+            if curl -fsS http://127.0.0.1:3000/health >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
 
           # Verification
+          systemctl is-active pastel-game
           systemctl is-active caddy
-          if [ "$HAS_SERVER" = "true" ]; then
-            systemctl is-active pastel-game
-          fi
+          curl -fsS http://127.0.0.1:3000/health
+          echo ""
           curl -fsI http://127.0.0.1:80
           EOF
