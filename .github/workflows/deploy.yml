@@ -1,0 +1,226 @@
+name: Build and Deploy to VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Build web client
+        run: npm run build
+
+      - name: Detect and bundle optional Node.js server
+        id: server
+        run: |
+          set -euo pipefail
+          SERVER_ENTRY=""
+          for candidate in \
+            server/src/index.ts \
+            server/index.ts \
+            server/src/index.js \
+            server/index.js; do
+            if [ -f "$candidate" ]; then
+              SERVER_ENTRY="$candidate"
+              break
+            fi
+          done
+
+          if [ -n "$SERVER_ENTRY" ]; then
+            echo "Found server entrypoint: $SERVER_ENTRY"
+            mkdir -p dist-server
+            npx --yes esbuild "$SERVER_ENTRY" \
+              --bundle \
+              --platform=node \
+              --target=node22 \
+              --format=esm \
+              --outfile=dist-server/index.mjs
+            echo "has_server=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No Node.js backend/WebSocket server detected; deploying client-only build."
+            echo "has_server=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install deployment tools on runner
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass rsync
+
+      - name: Bootstrap VPS
+        env:
+          SSHPASS: ${{ secrets.VPS_PASSWORD }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          HAS_SERVER: ${{ steps.server.outputs.has_server }}
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+          sshpass -e ssh $SSH_OPTS "${VPS_USER}@${VPS_HOST}" "HAS_SERVER='${HAS_SERVER}' bash -s" <<'EOF'
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+
+          # 1. Idempotent 1 GB swapfile
+          if [ ! -f /swapfile ]; then
+            fallocate -l 1G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=1024 status=none
+            chmod 600 /swapfile
+            mkswap /swapfile
+            swapon /swapfile
+            grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap sw 0 0' >> /etc/fstab
+          elif ! swapon --show | grep -q '/swapfile'; then
+            swapon /swapfile || true
+          fi
+
+          # 2. Install required system packages if missing
+          MISSING_PKGS=()
+          for pkg in caddy curl ca-certificates rsync; do
+            if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+              MISSING_PKGS+=("$pkg")
+            fi
+          done
+          if [ "${#MISSING_PKGS[@]}" -gt 0 ]; then
+            apt-get update -qq
+            apt-get install -y -qq "${MISSING_PKGS[@]}"
+          fi
+
+          # 3. Install Node.js 22 LTS only if a server exists and Node 22+ is missing
+          if [ "$HAS_SERVER" = "true" ]; then
+            NODE_MAJOR=0
+            if command -v node >/dev/null 2>&1; then
+              NODE_MAJOR=$(node -v | sed -E 's/^v([0-9]+).*/\1/')
+            fi
+            if [ "$NODE_MAJOR" -lt 22 ]; then
+              curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+              apt-get install -y -qq nodejs
+            fi
+          fi
+
+          # 4. Ensure target directories exist
+          mkdir -p /opt/pastel-survivors/client
+          if [ "$HAS_SERVER" = "true" ]; then
+            mkdir -p /opt/pastel-survivors/server
+          fi
+          EOF
+
+      - name: Upload built artifacts via rsync
+        env:
+          SSHPASS: ${{ secrets.VPS_PASSWORD }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          HAS_SERVER: ${{ steps.server.outputs.has_server }}
+        run: |
+          set -euo pipefail
+          SSH_CMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+          sshpass -e rsync -az --delete -e "$SSH_CMD" dist/ "${VPS_USER}@${VPS_HOST}:/opt/pastel-survivors/client/"
+          if [ "$HAS_SERVER" = "true" ]; then
+            sshpass -e rsync -az --delete -e "$SSH_CMD" dist-server/ "${VPS_USER}@${VPS_HOST}:/opt/pastel-survivors/server/"
+          fi
+
+      - name: Configure services, Caddy, and verify deployment
+        env:
+          SSHPASS: ${{ secrets.VPS_PASSWORD }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_DOMAIN: ${{ secrets.VPS_DOMAIN }}
+          HAS_SERVER: ${{ steps.server.outputs.has_server }}
+        run: |
+          set -euo pipefail
+          SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=15"
+          sshpass -e ssh $SSH_OPTS "${VPS_USER}@${VPS_HOST}" "HAS_SERVER='${HAS_SERVER}' VPS_DOMAIN='${VPS_DOMAIN}' bash -s" <<'EOF'
+          set -euo pipefail
+
+          # Ensure Caddy can read static assets
+          chmod -R a+rX /opt/pastel-survivors/client
+
+          # Configure systemd service only if a Node server exists
+          if [ "$HAS_SERVER" = "true" ]; then
+            cat > /etc/systemd/system/pastel-game.service <<'UNIT'
+          [Unit]
+          Description=Pastel Survivors Game Server
+          After=network.target
+
+          [Service]
+          Type=simple
+          WorkingDirectory=/opt/pastel-survivors/server
+          ExecStart=/usr/bin/node /opt/pastel-survivors/server/index.mjs
+          Environment=PORT=3000
+          Environment=NODE_ENV=production
+          Restart=always
+          RestartSec=3
+          MemoryMax=350M
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+            systemctl daemon-reload
+            systemctl enable pastel-game
+            systemctl restart pastel-game
+          fi
+
+          # Write Caddyfile
+          SITE_ADDR=":80"
+          if [ -n "$VPS_DOMAIN" ]; then
+            SITE_ADDR="$VPS_DOMAIN"
+          fi
+
+          if [ "$HAS_SERVER" = "true" ]; then
+            cat > /etc/caddy/Caddyfile <<CADDY
+          ${SITE_ADDR} {
+              handle /ws* {
+                  reverse_proxy 127.0.0.1:3000
+              }
+              handle {
+                  root * /opt/pastel-survivors/client
+                  try_files {path} /index.html
+                  file_server
+              }
+          }
+          CADDY
+          else
+            cat > /etc/caddy/Caddyfile <<CADDY
+          ${SITE_ADDR} {
+              root * /opt/pastel-survivors/client
+              try_files {path} /index.html
+              file_server
+          }
+          CADDY
+          fi
+
+          caddy validate --config /etc/caddy/Caddyfile
+          systemctl enable caddy
+          if systemctl is-active --quiet caddy; then
+            systemctl reload caddy
+          else
+            systemctl start caddy
+          fi
+
+          # Verification
+          systemctl is-active caddy
+          if [ "$HAS_SERVER" = "true" ]; then
+            systemctl is-active pastel-game
+          fi
+          curl -fsI http://127.0.0.1:80
+          EOF
