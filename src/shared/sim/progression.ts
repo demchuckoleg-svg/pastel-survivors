@@ -72,7 +72,7 @@ export function buildComputedStats(player: Pick<
   const starlightCritBonus = (player.starlightBuffTimer ?? 0) > 0 ? 0.15 : 0;
   const starlightCdBonus = (player.starlightBuffTimer ?? 0) > 0 ? 0.12 : 0;
   const sharedCdBonus = (player.sharedCdAuraTimer ?? 0) > 0 ? 0.12 : 0;
-  const totemRegenBonus = (player.totemRegenTimer ?? 0) > 0 ? 2.5 : 0;
+  const totemRegenBonus = (player.totemRegenTimer ?? 0) > 0 ? 0.8 : 0;
 
   return {
     maxHp: Math.round(base.maxHp + maxHpFlat),

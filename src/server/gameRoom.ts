@@ -7,6 +7,7 @@ import {
   MAX_ROOM_ENEMIES,
   MAX_ROOM_PLAYERS,
   patchSnapshotPersonalXp,
+  PROTOCOL_VERSION,
   SERVER_FIXED_DT,
   SERVER_TICK_RATE,
   WireEnemyFlag,
@@ -271,6 +272,7 @@ export class GameRoom {
       reconnectToken: session.reconnectToken,
       isHost: session.playerId === this.hostPlayerId,
       roomState,
+      protocolVersion: PROTOCOL_VERSION,
     });
     this.broadcastJson({ type: 'ROOM_STATE', roomState }, session.playerId);
 

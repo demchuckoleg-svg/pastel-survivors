@@ -1315,9 +1315,9 @@ export class AbilityRunner {
             knockback: kb,
             age: 0,
             maxLife: stats.duration,
-            tickTimer: 0.05,
-            tickInterval: 0.5,
-            healPerTick: Math.max(2, Math.round(3 + damage * 0.14)),
+            tickTimer: 0.12,
+            tickInterval: 0.85,
+            healPerTick: Math.max(1, Math.round(1 + damage * 0.04)),
           });
           ctx.spawnRingParticle(zx, zy, PALETTE.mintLight, zoneRadius * 0.85, 0.35);
         }
@@ -1382,9 +1382,9 @@ export class AbilityRunner {
       }
 
       case 'protective_ward': {
-        const auraRadius = 145 * ctx.stats.areaMult * (ctx.stats.hasAuraRadiusBoost ? 1.25 : 1);
-        const shieldAmount = Math.max(10, Math.round(12 + damage * 0.45));
-        ctx.grantShieldInRadius?.(p.x, p.y, auraRadius, shieldAmount, 5.0);
+        const auraRadius = 135 * ctx.stats.areaMult * (ctx.stats.hasAuraRadiusBoost ? 1.25 : 1);
+        const shieldAmount = Math.max(4, Math.round(4 + damage * 0.16));
+        ctx.grantShieldInRadius?.(p.x, p.y, auraRadius, shieldAmount, 3.0);
         const orbitRadius = 68 * Math.sqrt(ctx.stats.areaMult);
         this.orbits = this.orbits.filter((o) => o.sourceId !== 'protective_ward');
         this.orbits.push({
@@ -1401,8 +1401,8 @@ export class AbilityRunner {
           age: 0,
           maxLife: stats.duration,
           hitCooldowns: new Map(),
-          shieldPulseTimer: 1.6,
-          shieldAmount: Math.max(6, Math.round(shieldAmount * 0.5)),
+          shieldPulseTimer: 2.8,
+          shieldAmount: Math.max(2, Math.round(shieldAmount * 0.4)),
         });
         ctx.spawnRingParticle(p.x, p.y, PALETTE.butterLight, auraRadius * 0.7, 0.35);
         return;
@@ -2182,10 +2182,10 @@ export class AbilityRunner {
             knockback: kb,
             age: 0,
             maxLife: stats.duration,
-            tickTimer: 0.04,
-            tickInterval: 0.42,
-            healPerTick: Math.max(5, Math.round(6 + damage * 0.14)),
-            grantHasteSec: 2.8,
+            tickTimer: 0.1,
+            tickInterval: 0.8,
+            healPerTick: Math.max(2, Math.round(2 + damage * 0.05)),
+            grantHasteSec: 2.2,
           });
           ctx.spawnRingParticle(zx, zy, PALETTE.butter, zoneRadius, 0.4);
         }
@@ -3446,10 +3446,10 @@ export class AbilityRunner {
       // Periodic ally regen & shield pulse
       t.pulseTimer -= dt;
       if (t.pulseTimer <= 0) {
-        t.pulseTimer = 1.0;
-        ctx.grantTotemRegenInRadius?.(t.x, t.y, t.radius, 1.4);
+        t.pulseTimer = 2.0;
+        ctx.grantTotemRegenInRadius?.(t.x, t.y, t.radius, 2.2);
         if (t.isAegisLantern) {
-          ctx.grantShieldInRadius?.(t.x, t.y, t.radius, Math.max(8, Math.round(t.damage * 0.18)), 4.5);
+          ctx.grantShieldInRadius?.(t.x, t.y, t.radius, Math.max(3, Math.round(t.damage * 0.08)), 3.0);
         }
       }
 

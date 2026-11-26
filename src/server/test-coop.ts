@@ -885,6 +885,19 @@ runTest('Co-op AbilityFired aimAngle and ProjectileSpawned/Despawned sync with s
   assert.ok(spawnedNetIds.size > 0, 'ProjectileSpawned must be emitted for co-op projectiles');
   assert.equal(damagedTarget, true, 'Server projectile must hit the target enemy');
   assert.ok(despawnedNetIds.size > 0, 'ProjectileDespawned must be emitted when projectile hits target');
+
+  // Verify co-op magnet only attracts XP gems within 420px radius
+  room.sim.pickups.length = 0;
+  p1.x = 0;
+  p1.y = 0;
+  room.sim.spawnPickup('xp_small', 200, 0, 10);
+  room.sim.spawnPickup('xp_small', 800, 0, 10);
+  room.sim.spawnPickup('magnet', 0, 0, 0);
+  room.step(0.05);
+  const nearGem = room.sim.pickups.find((pk) => pk.kind === 'xp_small' && Math.abs(pk.x) < 300);
+  const farGem = room.sim.pickups.find((pk) => pk.kind === 'xp_small' && pk.x > 600);
+  assert.ok(nearGem?.magnetized === true, 'Nearby XP gem (200px) must be pulled by co-op magnet');
+  assert.ok(farGem && farGem.magnetized === false, 'Faraway XP gem (800px) must NOT be stolen by co-op magnet');
 });
 
 console.log('\nAll 8 co-op simulation test suites passed!');

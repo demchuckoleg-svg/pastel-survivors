@@ -22,7 +22,7 @@ import type {
 // PROTOCOL CONSTANTS & OPCODES
 // ============================================================================
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 export const SERVER_TICK_RATE = 20;
 export const SERVER_FIXED_DT = 1 / SERVER_TICK_RATE;
 export const MAX_ROOM_PLAYERS = 4;
@@ -674,6 +674,7 @@ export type ServerControlMessage =
       reconnectToken: string;
       isHost: boolean;
       roomState: RoomStatePayload;
+      protocolVersion?: number;
     }
   | {
       type: 'ROOM_STATE';

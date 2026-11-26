@@ -1582,12 +1582,12 @@ export class GameSimulation {
     p.hp = Math.min(p.maxHp, rawNewHp);
     const healed = Math.round(p.hp - before);
 
-    // Aether Alembic: excess healing converts into temporary pastel shield HP (up to 50% Max HP)
+    // Aether Alembic: excess healing converts into temporary pastel shield HP (up to 25% Max HP)
     const overheal = rawNewHp - p.maxHp;
     if (overheal > 0 && (allowOverhealShield || p.computedStats.hasOverhealToShield)) {
-      const maxShield = Math.round(p.maxHp * 0.5);
-      p.shieldHp = Math.min(maxShield, p.shieldHp + overheal);
-      p.shieldTimer = Math.max(p.shieldTimer, 5.5);
+      const maxShield = Math.round(p.maxHp * 0.25);
+      p.shieldHp = Math.min(maxShield, p.shieldHp + overheal * 0.5);
+      p.shieldTimer = Math.max(p.shieldTimer, 3.5);
     }
 
     if (healed > 0) {
@@ -2684,11 +2684,29 @@ export class GameSimulation {
     }
 
     if (item.kind === 'magnet') {
+      const isCoop = this.mode === 'coop' || this.players.size > 1;
+      const coopMagnetRadius = 420;
+      const coopMagnetRadiusSq = coopMagnetRadius * coopMagnetRadius;
       for (let i = 0; i < this.pickups.length; i++) {
-        if (this.pickups[i].kind.startsWith('xp_')) {
-          this.pickups[i].magnetized = true;
-          this.pickups[i].magnetTargetId = player.id;
+        const pk = this.pickups[i];
+        if (!pk.kind.startsWith('xp_')) continue;
+        if (isCoop) {
+          const dx = pk.x - player.x;
+          const dy = pk.y - player.y;
+          if (dx * dx + dy * dy > coopMagnetRadiusSq) continue;
         }
+        pk.magnetized = true;
+        pk.magnetTargetId = player.id;
+      }
+      if (isCoop) {
+        this.emit({
+          type: 'VfxRing',
+          x: player.x,
+          y: player.y,
+          color: PALETTE.babyBlue,
+          maxRadius: coopMagnetRadius,
+          duration: 0.45,
+        });
       }
       this.emit({
         type: 'PickupCollected',
@@ -2798,7 +2816,7 @@ export class GameSimulation {
           const dx = ally.x - x;
           const dy = ally.y - y;
           if (dx * dx + dy * dy <= rSq) {
-            const maxShield = Math.round(ally.maxHp * 0.5);
+            const maxShield = Math.round(ally.maxHp * 0.25);
             ally.shieldHp = Math.min(maxShield, ally.shieldHp + shieldAmount);
             ally.shieldTimer = Math.max(ally.shieldTimer, durationSec);
             count++;

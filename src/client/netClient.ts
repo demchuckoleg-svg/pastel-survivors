@@ -10,6 +10,7 @@ import {
   normalizeRoomCode,
   peekBinaryOpcode,
   PICK_UPGRADE_PACKET_BYTES,
+  PROTOCOL_VERSION,
   SERVER_TICK_RATE,
   WirePlayerFlag,
   type BinaryCombatEvent,
@@ -963,8 +964,9 @@ export class NetClient {
         default:
           break;
       }
-    } catch {
-      // Ignore malformed binary frames defensively
+    } catch (err) {
+      // Log malformed/mismatched binary frames so protocol drift is visible
+      console.warn('[NetClient] Failed to decode binary frame:', err);
     }
   }
 
@@ -1049,6 +1051,15 @@ export class NetClient {
       }
 
       case 'ROOM_JOINED': {
+        if (
+          typeof msg.protocolVersion === 'number' &&
+          msg.protocolVersion !== PROTOCOL_VERSION
+        ) {
+          this.callbacks.onError?.(
+            'VERSION_MISMATCH',
+            'A newer game update is live — please hard-refresh the page.'
+          );
+        }
         this.roomCode = msg.roomCode;
         this.playerId = msg.playerId;
         this.slotId = msg.slotId;

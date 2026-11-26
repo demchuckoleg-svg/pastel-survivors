@@ -155,6 +155,7 @@ jobs:
               handle {
                   root * /opt/pastel-survivors/client
                   try_files {path} /index.html
+                  header Cache-Control "no-cache, no-store, must-revalidate"
                   file_server
               }
           }
