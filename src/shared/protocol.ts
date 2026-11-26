@@ -4,6 +4,7 @@ import type {
   EnemySpriteId,
   HeroId,
   PickupSpriteId,
+  ProjectileSpriteId,
   SynergyId,
 } from './data/types';
 import type {
@@ -88,6 +89,9 @@ export const BinaryEventType = {
   PLAYER_DOWNED: 5,
   PLAYER_REVIVED: 6,
   BOSS_HAZARD: 7,
+  PROJECTILE_SPAWNED: 8,
+  PROJECTILE_MOVED: 9,
+  PROJECTILE_DESPAWNED: 10,
 } as const;
 
 export const DamageNumberFlag = {
@@ -349,6 +353,32 @@ export function decodeAbilityId(code: number): AbilityId | SynergyId {
   return ABILITY_AND_SYNERGY_IDS[code] ?? 'fireball';
 }
 
+export const PROJECTILE_SPRITE_IDS: readonly ProjectileSpriteId[] = [
+  'fireball',
+  'ice',
+  'lightning',
+  'arcane',
+  'shadow',
+  'bullet',
+  'arrow',
+  'axe',
+  'hammer',
+  'spear',
+  'vial',
+  'enemy_orb',
+] as const;
+
+export function encodeProjectileSprite(spriteId: ProjectileSpriteId | undefined): number {
+  if (!spriteId) return 0;
+  const idx = PROJECTILE_SPRITE_IDS.indexOf(spriteId);
+  return idx >= 0 ? idx + 1 : 0;
+}
+
+export function decodeProjectileSprite(code: number): ProjectileSpriteId | undefined {
+  if (code <= 0) return undefined;
+  return PROJECTILE_SPRITE_IDS[code - 1];
+}
+
 // ============================================================================
 // WIRE TYPES (BINARY SNAPSHOTS & EVENTS)
 // ============================================================================
@@ -518,6 +548,36 @@ export type BinaryCombatEvent =
       radius: number;
       durationMs: number;
       active: boolean;
+    }
+  | {
+      type: 'ProjectileSpawned';
+      netId: number;
+      /** Player slot ID (`1..4`), or `0` for enemy/boss projectiles. */
+      playerId: number;
+      sourceId: AbilityId | SynergyId;
+      spriteId?: ProjectileSpriteId;
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      radius: number;
+      scale: number;
+      spinSpeed: number;
+      lifeMs: number;
+    }
+  | {
+      type: 'ProjectileMoved';
+      netId: number;
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+    }
+  | {
+      type: 'ProjectileDespawned';
+      netId: number;
+      x: number;
+      y: number;
     };
 
 export interface MatchSummaryPlayer {
@@ -1162,6 +1222,12 @@ function getBinaryEventByteSize(ev: BinaryCombatEvent): number {
       return 9;
     case 'BossHazard':
       return 14;
+    case 'ProjectileSpawned':
+      return 18;
+    case 'ProjectileMoved':
+      return 11;
+    case 'ProjectileDespawned':
+      return 7;
   }
 }
 
@@ -1317,6 +1383,64 @@ export function encodeBinaryEvents(
         view.setUint16(offset, clampU16(ev.radius), true);
         offset += 2;
         view.setUint16(offset, clampU16(ev.durationMs), true);
+        offset += 2;
+        break;
+      }
+
+      case 'ProjectileSpawned': {
+        view.setUint8(offset, BinaryEventType.PROJECTILE_SPAWNED);
+        offset += 1;
+        view.setUint16(offset, clampU16(ev.netId), true);
+        offset += 2;
+        view.setUint8(offset, clampU8(ev.playerId));
+        offset += 1;
+        view.setUint8(offset, encodeAbilityId(ev.sourceId));
+        offset += 1;
+        view.setUint8(offset, encodeProjectileSprite(ev.spriteId) & 0x0f);
+        offset += 1;
+        view.setInt16(offset, clampI16(ev.x), true);
+        offset += 2;
+        view.setInt16(offset, clampI16(ev.y), true);
+        offset += 2;
+        view.setInt16(offset, clampI16(ev.vx), true);
+        offset += 2;
+        view.setInt16(offset, clampI16(ev.vy), true);
+        offset += 2;
+        view.setUint8(offset, clampInt(ev.radius, 1, U8_MAX));
+        offset += 1;
+        view.setUint8(offset, clampU8(ev.scale * 50));
+        offset += 1;
+        view.setInt8(offset, clampInt(ev.spinSpeed * 5, -127, 127));
+        offset += 1;
+        view.setUint8(offset, clampInt(ev.lifeMs / 50, 1, U8_MAX));
+        offset += 1;
+        break;
+      }
+
+      case 'ProjectileMoved': {
+        view.setUint8(offset, BinaryEventType.PROJECTILE_MOVED);
+        offset += 1;
+        view.setUint16(offset, clampU16(ev.netId), true);
+        offset += 2;
+        view.setInt16(offset, clampI16(ev.x), true);
+        offset += 2;
+        view.setInt16(offset, clampI16(ev.y), true);
+        offset += 2;
+        view.setInt16(offset, clampI16(ev.vx), true);
+        offset += 2;
+        view.setInt16(offset, clampI16(ev.vy), true);
+        offset += 2;
+        break;
+      }
+
+      case 'ProjectileDespawned': {
+        view.setUint8(offset, BinaryEventType.PROJECTILE_DESPAWNED);
+        offset += 1;
+        view.setUint16(offset, clampU16(ev.netId), true);
+        offset += 2;
+        view.setInt16(offset, clampI16(ev.x), true);
+        offset += 2;
+        view.setInt16(offset, clampI16(ev.y), true);
         offset += 2;
         break;
       }
@@ -1513,6 +1637,87 @@ export function decodeBinaryEvents(input: ArrayBuffer | Uint8Array): BinaryComba
           radius,
           durationMs,
           active,
+        });
+        break;
+      }
+
+      case BinaryEventType.PROJECTILE_SPAWNED: {
+        const netId = view.getUint16(offset, true);
+        offset += 2;
+        const playerId = view.getUint8(offset);
+        offset += 1;
+        const sourceId = decodeAbilityId(view.getUint8(offset));
+        offset += 1;
+        const spriteId = decodeProjectileSprite(view.getUint8(offset) & 0x0f);
+        offset += 1;
+        const x = view.getInt16(offset, true);
+        offset += 2;
+        const y = view.getInt16(offset, true);
+        offset += 2;
+        const vx = view.getInt16(offset, true);
+        offset += 2;
+        const vy = view.getInt16(offset, true);
+        offset += 2;
+        const radius = view.getUint8(offset);
+        offset += 1;
+        const scale = view.getUint8(offset) / 50;
+        offset += 1;
+        const spinSpeed = view.getInt8(offset) / 5;
+        offset += 1;
+        const lifeMs = view.getUint8(offset) * 50;
+        offset += 1;
+        out.push({
+          type: 'ProjectileSpawned',
+          netId,
+          playerId,
+          sourceId,
+          spriteId,
+          x,
+          y,
+          vx,
+          vy,
+          radius,
+          scale,
+          spinSpeed,
+          lifeMs,
+        });
+        break;
+      }
+
+      case BinaryEventType.PROJECTILE_MOVED: {
+        const netId = view.getUint16(offset, true);
+        offset += 2;
+        const x = view.getInt16(offset, true);
+        offset += 2;
+        const y = view.getInt16(offset, true);
+        offset += 2;
+        const vx = view.getInt16(offset, true);
+        offset += 2;
+        const vy = view.getInt16(offset, true);
+        offset += 2;
+        out.push({
+          type: 'ProjectileMoved',
+          netId,
+          x,
+          y,
+          vx,
+          vy,
+        });
+        break;
+      }
+
+      case BinaryEventType.PROJECTILE_DESPAWNED: {
+        const netId = view.getUint16(offset, true);
+        offset += 2;
+        const x = view.getInt16(offset, true);
+        offset += 2;
+        const y = view.getInt16(offset, true);
+        offset += 2;
+        out.push({
+          type: 'ProjectileDespawned',
+          netId,
+          x,
+          y,
         });
         break;
       }

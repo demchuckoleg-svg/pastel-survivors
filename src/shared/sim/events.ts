@@ -5,9 +5,11 @@ import type {
   BossId,
   EnemySpriteId,
   PickupSpriteId,
+  ProjectileSpriteId,
   SynergyId,
 } from '../data/types';
 import type {
+  ActiveProjectile,
   BossActiveInfo,
   LevelUpChoice,
   ParticleBurstOptions,
@@ -32,6 +34,44 @@ export type SimEvent =
       y: number;
       color: string;
       isDoubleCast?: boolean;
+      /**
+       * The actual angle the cast was aimed at (auto-target toward nearest enemy or manual aim),
+       * NOT the hero's facing/movement direction.
+       */
+      aimAngle: number;
+    }
+  | {
+      /** Authoritative projectile entered the world (co-op replication only). */
+      type: 'ProjectileSpawned';
+      netId: number;
+      playerId: PlayerId;
+      sourceId: AbilityId | SynergyId;
+      spriteId?: ProjectileSpriteId;
+      kind: ActiveProjectile['kind'];
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+      radius: number;
+      scale: number;
+      spinSpeed: number;
+      remainingLifeSec: number;
+    }
+  | {
+      /** Authoritative projectile changed course / drifted from its last replicated path. */
+      type: 'ProjectileMoved';
+      netId: number;
+      x: number;
+      y: number;
+      vx: number;
+      vy: number;
+    }
+  | {
+      /** Authoritative projectile was removed (hit, expired, or returned). */
+      type: 'ProjectileDespawned';
+      netId: number;
+      x: number;
+      y: number;
     }
   | {
       type: 'DamageDealt';

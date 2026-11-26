@@ -22,9 +22,10 @@ import type {
 type WorldToScreenFn = (wx: number, wy: number) => { x: number; y: number };
 
 const TEAMMATE_EFFECT_OPACITY = 0.5;
-const MAX_LOCAL_PROJECTILES = 140;
+const MAX_LOCAL_PROJECTILES = 280;
 
 interface VisualProjectile {
+  netId?: number;
   ownerSlotId: number;
   sourceId: AbilityId | SynergyId;
   spriteId?: ProjectileSpriteId;
@@ -192,6 +193,7 @@ interface VisualBossHazard {
  */
 export class CoopVfxSystem {
   private readonly projectiles: VisualProjectile[] = [];
+  private readonly projectilesByNetId = new Map<number, VisualProjectile>();
   private readonly beams: VisualBeam[] = [];
   private readonly novas: VisualNova[] = [];
   private readonly meleeArcs: VisualMeleeArc[] = [];
@@ -213,6 +215,7 @@ export class CoopVfxSystem {
 
   public reset(): void {
     this.projectiles.length = 0;
+    this.projectilesByNetId.clear();
     this.beams.length = 0;
     this.novas.length = 0;
     this.meleeArcs.length = 0;
@@ -420,52 +423,9 @@ export class CoopVfxSystem {
   }
 
   private spawnBossExecuteVisuals(boss: WireBossState, bossEnemy: InterpolatedEnemy): void {
-    const def = BOSSES[boss.bossId];
-    if (boss.attackId === 'mochi_syrup_burst') {
-      const count = 12;
-      for (let i = 0; i < count; i++) {
-        const a = boss.baseAngle + (i * Math.PI * 2) / count;
-        this.pushProjectile({
-          ownerSlotId: 0,
-          sourceId: 'fireball',
-          spriteId: 'enemy_orb',
-          color: def.accentColor,
-          x: bossEnemy.x,
-          y: bossEnemy.y,
-          vx: Math.cos(a) * 195,
-          vy: Math.sin(a) * 195,
-          radius: 8,
-          rotation: a,
-          spinSpeed: 0,
-          scale: 1.9,
-          age: 0,
-          maxLife: 2.1,
-          isEnemyOrb: true,
-        });
-      }
-    } else if (boss.attackId === 'wisteria_petal_spiral') {
-      const count = 8;
-      for (let i = 0; i < count; i++) {
-        const a = boss.baseAngle + (i * Math.PI * 2) / count;
-        this.pushProjectile({
-          ownerSlotId: 0,
-          sourceId: 'arcane_orb',
-          spriteId: 'enemy_orb',
-          color: PALETTE.lavender,
-          x: bossEnemy.x,
-          y: bossEnemy.y,
-          vx: Math.cos(a) * 210,
-          vy: Math.sin(a) * 210,
-          radius: 7,
-          rotation: a,
-          spinSpeed: 3,
-          scale: 1.75,
-          age: 0,
-          maxLife: 2.0,
-          isEnemyOrb: true,
-        });
-      }
-    } else if (boss.attackId === 'aegis_bastion_nova') {
+    // Boss projectiles (mochi_syrup_burst, wisteria_petal_spiral, macaron spirals, tiramisu volleys)
+    // are replicated authoritatively via `ProjectileSpawned` / `ProjectileDespawned` events.
+    if (boss.attackId === 'aegis_bastion_nova') {
       this.novas.push({
         ownerSlotId: 0,
         x: bossEnemy.x,
@@ -477,6 +437,97 @@ export class CoopVfxSystem {
         maxLife: 0.42,
         followOwner: false,
       });
+    }
+  }
+
+  /**
+   * Spawns an authoritative server projectile on the client so visuals match hitboxes 1:1.
+   */
+  public spawnReplicatedProjectile(
+    ev: Extract<BinaryCombatEvent, { type: 'ProjectileSpawned' }>
+  ): void {
+    const isEnemyOrb = ev.playerId === 0 || ev.spriteId === 'enemy_orb';
+    const syn = SYNERGIES[ev.sourceId as SynergyId];
+    const ab = ABILITIES[ev.sourceId as AbilityId];
+    const color = isEnemyOrb
+      ? PALETTE.lavender
+      : syn?.color ?? ab?.color ?? PALETTE.lavender;
+    const angle = Math.atan2(ev.vy, ev.vx);
+    // Keep a small lifetime cushion (+0.25s) so server `ProjectileDespawned` cleanly removes
+    // the projectile on impact/expiry rather than vanishing early due to jitter.
+    const maxLife = Math.max(0.15, ev.lifeMs / 1000 + 0.25);
+
+    const existing = this.projectilesByNetId.get(ev.netId);
+    if (existing) {
+      existing.ownerSlotId = ev.playerId;
+      existing.sourceId = ev.sourceId;
+      existing.spriteId = ev.spriteId;
+      existing.color = color;
+      existing.x = ev.x;
+      existing.y = ev.y;
+      existing.vx = ev.vx;
+      existing.vy = ev.vy;
+      existing.radius = ev.radius;
+      existing.rotation = angle;
+      existing.spinSpeed = ev.spinSpeed;
+      existing.scale = ev.scale;
+      existing.age = 0;
+      existing.maxLife = maxLife;
+      existing.isEnemyOrb = isEnemyOrb;
+      return;
+    }
+
+    const proj: VisualProjectile = {
+      netId: ev.netId,
+      ownerSlotId: ev.playerId,
+      sourceId: ev.sourceId,
+      spriteId: ev.spriteId,
+      color,
+      x: ev.x,
+      y: ev.y,
+      vx: ev.vx,
+      vy: ev.vy,
+      radius: ev.radius,
+      rotation: angle,
+      spinSpeed: ev.spinSpeed,
+      scale: ev.scale,
+      age: 0,
+      maxLife,
+      isEnemyOrb,
+    };
+    this.pushProjectile(proj);
+    this.projectilesByNetId.set(ev.netId, proj);
+  }
+
+  /**
+   * Applies an authoritative trajectory update (homing turn, boomerang return, ricochet bounce, dash chain).
+   */
+  public moveReplicatedProjectile(
+    ev: Extract<BinaryCombatEvent, { type: 'ProjectileMoved' }>
+  ): void {
+    const proj = this.projectilesByNetId.get(ev.netId);
+    if (!proj) return;
+    proj.x = ev.x;
+    proj.y = ev.y;
+    proj.vx = ev.vx;
+    proj.vy = ev.vy;
+    if (proj.spinSpeed === 0 && (ev.vx !== 0 || ev.vy !== 0)) {
+      proj.rotation = Math.atan2(ev.vy, ev.vx);
+    }
+  }
+
+  /**
+   * Removes an authoritative projectile immediately when it hits an enemy, expires, or returns.
+   */
+  public despawnReplicatedProjectile(
+    ev: Extract<BinaryCombatEvent, { type: 'ProjectileDespawned' }>
+  ): void {
+    const proj = this.projectilesByNetId.get(ev.netId);
+    if (!proj) return;
+    this.projectilesByNetId.delete(ev.netId);
+    const idx = this.projectiles.indexOf(proj);
+    if (idx >= 0) {
+      this.projectiles.splice(idx, 1);
     }
   }
 
@@ -501,7 +552,7 @@ export class CoopVfxSystem {
     const spriteId = syn ? syn.projectileSprite : ab?.projectileSprite;
     const stats = syn ? syn.evolvedSpec.stats : ab?.baseStats;
 
-    // Pick a crisp aim angle toward nearest enemy if aimAngle is 0/default
+    // Authoritative cast aim angle computed by the server's AbilityRunner
     const aimAngle = ev.aimAngle;
 
     switch (behavior) {
@@ -509,46 +560,8 @@ export class CoopVfxSystem {
       case 'homing':
       case 'boomerang':
       case 'ricochet': {
-        const count = Math.min(5, Math.max(1, stats?.count ?? 1));
-        const speed = Math.max(210, stats?.speed ?? 320);
-        const radius = Math.min(28, Math.max(8, (stats?.area ?? 16) * 0.65));
-        const spread =
-          ev.abilityId === 'shotgun_blast' || ev.abilityId === 'cluster_cannon'
-            ? 0.42
-            : count > 1
-            ? 0.18
-            : 0;
-        const maxLife =
-          behavior === 'boomerang'
-            ? Math.min(1.3, stats?.duration ?? 1.1)
-            : Math.min(1.15, (stats?.duration ?? 1.2) * 0.65);
-
-        for (let i = 0; i < count; i++) {
-          const offset = count > 1 ? ((i / (count - 1)) - 0.5) * spread : 0;
-          const a = aimAngle + offset;
-          this.pushProjectile({
-            ownerSlotId,
-            sourceId: ev.abilityId,
-            spriteId,
-            color,
-            x: originX + Math.cos(a) * 14,
-            y: originY + Math.sin(a) * 14,
-            vx: Math.cos(a) * speed,
-            vy: Math.sin(a) * speed,
-            radius,
-            rotation: a,
-            spinSpeed:
-              ev.abilityId === 'spinning_axe' ||
-              ev.abilityId === 'reapers_pendulum' ||
-              ev.abilityId === 'firestorm'
-                ? 11
-                : 0,
-            scale: ev.isSynergy ? 2.2 : 1.85,
-            age: 0,
-            maxLife,
-            isBoomerang: behavior === 'boomerang',
-          });
-        }
+        // Authoritative projectiles arrive via `ProjectileSpawned` / `ProjectileMoved` / `ProjectileDespawned`
+        // so visual trajectories and impacts match server damage 1:1.
         break;
       }
 
@@ -586,27 +599,7 @@ export class CoopVfxSystem {
           maxLife: 0.38,
           followOwner: true,
         });
-        if (ev.abilityId === 'absolute_zero') {
-          for (let i = 0; i < 8; i++) {
-            const a = aimAngle + (i * Math.PI * 2) / 8;
-            this.pushProjectile({
-              ownerSlotId,
-              sourceId: ev.abilityId,
-              spriteId: 'ice',
-              color: PALETTE.babyBlue,
-              x: originX,
-              y: originY,
-              vx: Math.cos(a) * 380,
-              vy: Math.sin(a) * 380,
-              radius: 10,
-              rotation: a,
-              spinSpeed: 0,
-              scale: 2.0,
-              age: 0,
-              maxLife: 0.75,
-            });
-          }
-        }
+        // Note: `absolute_zero` ice shards are replicated via `ProjectileSpawned`
         break;
       }
 
@@ -839,10 +832,13 @@ export class CoopVfxSystem {
       const p = this.projectiles[i];
       p.age += dt;
       if (p.age >= p.maxLife) {
+        if (p.netId !== undefined) {
+          this.projectilesByNetId.delete(p.netId);
+        }
         this.projectiles.splice(i, 1);
         continue;
       }
-      if (p.isBoomerang && p.age > p.maxLife * 0.45) {
+      if (p.netId === undefined && p.isBoomerang && p.age > p.maxLife * 0.45) {
         const owner = playerBySlot.get(p.ownerSlotId);
         if (owner) {
           const dx = owner.x - p.x;
@@ -923,7 +919,7 @@ export class CoopVfxSystem {
       }
     }
 
-    // 8. Turrets
+    // 8. Turrets (visual orientation only; authoritative turret shots arrive via ProjectileSpawned)
     for (let i = this.turrets.length - 1; i >= 0; i--) {
       const t = this.turrets[i];
       t.age += dt;
@@ -934,26 +930,6 @@ export class CoopVfxSystem {
       const target = this.findNearestEnemies(t.x, t.y, enemies, 1, 340)[0];
       if (target) {
         t.angle = Math.atan2(target.y - t.y, target.x - t.x);
-      }
-      t.fireTimer -= dt;
-      if (t.fireTimer <= 0 && target) {
-        t.fireTimer = t.isArtillery ? 0.35 : 0.45;
-        this.pushProjectile({
-          ownerSlotId: t.ownerSlotId,
-          sourceId: t.isArtillery ? 'artillery_barrage' : 'gatling_turret',
-          spriteId: 'bullet',
-          color: t.isArtillery ? PALETTE.mint : PALETTE.butter,
-          x: t.x + Math.cos(t.angle) * 14,
-          y: t.y + Math.sin(t.angle) * 14,
-          vx: Math.cos(t.angle) * 380,
-          vy: Math.sin(t.angle) * 380,
-          radius: 6,
-          rotation: t.angle,
-          spinSpeed: 0,
-          scale: 1.5,
-          age: 0,
-          maxLife: 0.65,
-        });
       }
     }
 
@@ -1681,7 +1657,10 @@ export class CoopVfxSystem {
 
   private pushProjectile(p: VisualProjectile): void {
     if (this.projectiles.length >= MAX_LOCAL_PROJECTILES) {
-      this.projectiles.shift();
+      const evicted = this.projectiles.shift();
+      if (evicted?.netId !== undefined) {
+        this.projectilesByNetId.delete(evicted.netId);
+      }
     }
     this.projectiles.push(p);
   }

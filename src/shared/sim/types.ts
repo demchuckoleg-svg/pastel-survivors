@@ -273,6 +273,8 @@ export interface EnemyProjectile {
   life: number;
   maxLife: number;
   color: string;
+  /** Network replication ID (authoritative co-op server only). */
+  netId?: number;
 }
 
 export interface DamageOptions {
@@ -587,6 +589,17 @@ export interface ActiveProjectile {
   boomerangReturned?: boolean;
   spiralDir?: number;
   dashChainCount?: number;
+  /**
+   * Network replication bookkeeping (authoritative co-op server only).
+   * `netId` is assigned the first tick the projectile is replicated; `netX/netY/netVx/netVy/netAge`
+   * hold the last state sent to clients so the runner can detect drift and re-sync.
+   */
+  netId?: number;
+  netX?: number;
+  netY?: number;
+  netVx?: number;
+  netVy?: number;
+  netAge?: number;
 }
 
 export interface ActiveBeam {

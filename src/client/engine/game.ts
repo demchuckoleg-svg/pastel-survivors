@@ -1069,6 +1069,21 @@ export class GameEngine {
           );
           break;
         }
+
+        case 'ProjectileSpawned': {
+          this.coopVfx.spawnReplicatedProjectile(ev);
+          break;
+        }
+
+        case 'ProjectileMoved': {
+          this.coopVfx.moveReplicatedProjectile(ev);
+          break;
+        }
+
+        case 'ProjectileDespawned': {
+          this.coopVfx.despawnReplicatedProjectile(ev);
+          break;
+        }
       }
     }
   }

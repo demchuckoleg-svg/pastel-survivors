@@ -367,6 +367,35 @@ function testProtocolBinaryRoundTrips(): void {
       durationMs: 1200,
       active: true,
     },
+    {
+      type: 'ProjectileSpawned',
+      netId: 421,
+      playerId: 1,
+      sourceId: 'twin_pistols',
+      spriteId: 'bullet',
+      x: 125,
+      y: -40,
+      vx: -360,
+      vy: 240,
+      radius: 10,
+      scale: 1.8,
+      spinSpeed: 0,
+      lifeMs: 1200,
+    },
+    {
+      type: 'ProjectileMoved',
+      netId: 421,
+      x: 90,
+      y: -15,
+      vx: -310,
+      vy: 290,
+    },
+    {
+      type: 'ProjectileDespawned',
+      netId: 421,
+      x: 60,
+      y: 12,
+    },
   ];
   const decodedEvents = decodeBinaryEvents(encodeBinaryEvents(combatEvents));
   assert.equal(decodedEvents.length, combatEvents.length);
@@ -384,6 +413,29 @@ function testProtocolBinaryRoundTrips(): void {
     assert.equal(decodedEvents[6].hazardKind, 'arena_ring');
     assert.equal(decodedEvents[6].radius, 310);
     assert.equal(decodedEvents[6].active, true);
+  }
+  assert.equal(decodedEvents[7].type, 'ProjectileSpawned');
+  if (decodedEvents[7].type === 'ProjectileSpawned') {
+    assert.equal(decodedEvents[7].netId, 421);
+    assert.equal(decodedEvents[7].playerId, 1);
+    assert.equal(decodedEvents[7].sourceId, 'twin_pistols');
+    assert.equal(decodedEvents[7].spriteId, 'bullet');
+    assert.equal(decodedEvents[7].vx, -360);
+    assert.equal(decodedEvents[7].vy, 240);
+    assert.ok(Math.abs(decodedEvents[7].scale - 1.8) < 0.03);
+    assert.equal(decodedEvents[7].lifeMs, 1200);
+  }
+  assert.equal(decodedEvents[8].type, 'ProjectileMoved');
+  if (decodedEvents[8].type === 'ProjectileMoved') {
+    assert.equal(decodedEvents[8].netId, 421);
+    assert.equal(decodedEvents[8].vx, -310);
+    assert.equal(decodedEvents[8].vy, 290);
+  }
+  assert.equal(decodedEvents[9].type, 'ProjectileDespawned');
+  if (decodedEvents[9].type === 'ProjectileDespawned') {
+    assert.equal(decodedEvents[9].netId, 421);
+    assert.equal(decodedEvents[9].x, 60);
+    assert.equal(decodedEvents[9].y, 12);
   }
 
   // Client binary INPUT & PICK_UPGRADE round-trip

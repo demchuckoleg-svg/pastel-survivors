@@ -822,4 +822,69 @@ runTest('Alchemist abilities/synergies/artifacts & Twin Macarons / Countess Tira
   assert.ok(countess.alive, 'Countess Tiramisu should step cleanly without runtime errors');
 });
 
-console.log('\nAll 7 co-op simulation test suites passed!');
+// ============================================================================
+// TEST 8: Authoritative Co-op Projectile Replication & Real AimAngle Sync
+// ============================================================================
+runTest('Co-op AbilityFired aimAngle and ProjectileSpawned/Despawned sync with server hits', () => {
+  const room = new CoopRoom({ roomId: 'proj-sync-test', seed: 909 });
+  room.addPlayer('p1', 'ranger');
+  room.addPlayer('p2', 'mage');
+  room.startMatch();
+
+  const p1 = room.sim.getPlayer('p1')!;
+  const p2 = room.sim.getPlayer('p2')!;
+  p1.x = 0;
+  p1.y = 0;
+  p2.x = 2000;
+  p2.y = 2000;
+  p1.activeSlots = [{ kind: 'ability', id: 'twin_pistols', level: 1, cooldownTimer: 0 }];
+  p2.activeSlots = [];
+
+  // Place enemy UP-LEFT (-140, -140) while player walks RIGHT (+1, 0) in auto-aim mode
+  const target = room.sim.spawnEnemy('golem', -140, -140, 2000);
+  target.speed = 0;
+  room.setPlayerInput('p1', { moveX: 1, moveY: 0, aimMode: 'auto' });
+
+  const expectedAngle = Math.atan2(-140, -140); // -2.356 rad (NOT 0 rad movement direction)
+  const spawnedNetIds = new Set<number>();
+  const despawnedNetIds = new Set<number>();
+  let firedAngle: number | null = null;
+  let damagedTarget = false;
+
+  for (let tick = 0; tick < 20; tick++) {
+    const { events } = room.step(0.05);
+    for (const ev of events) {
+      if (ev.type === 'AbilityFired' && ev.playerId === 'p1' && firedAngle === null) {
+        firedAngle = ev.aimAngle;
+      }
+      if (ev.type === 'ProjectileSpawned' && ev.playerId === 'p1') {
+        spawnedNetIds.add(ev.netId);
+        const projAngle = Math.atan2(ev.vy, ev.vx);
+        const diff = Math.abs(Math.atan2(Math.sin(projAngle - expectedAngle), Math.cos(projAngle - expectedAngle)));
+        assert.ok(
+          diff < 0.25,
+          `Replicated projectile must fly toward enemy (${expectedAngle.toFixed(2)}), got ${projAngle.toFixed(2)}`
+        );
+      }
+      if (ev.type === 'ProjectileDespawned' && spawnedNetIds.has(ev.netId)) {
+        despawnedNetIds.add(ev.netId);
+      }
+      if (ev.type === 'DamageDealt' && ev.enemyId === target.id) {
+        damagedTarget = true;
+      }
+    }
+    if (damagedTarget && despawnedNetIds.size > 0) break;
+  }
+
+  assert.ok(firedAngle !== null, 'AbilityFired must be emitted');
+  const aimDiff = Math.abs(Math.atan2(Math.sin(firedAngle! - expectedAngle), Math.cos(firedAngle! - expectedAngle)));
+  assert.ok(
+    aimDiff < 0.2,
+    `AbilityFired.aimAngle must reflect real target angle (${expectedAngle.toFixed(2)}), got ${firedAngle!.toFixed(2)}`
+  );
+  assert.ok(spawnedNetIds.size > 0, 'ProjectileSpawned must be emitted for co-op projectiles');
+  assert.equal(damagedTarget, true, 'Server projectile must hit the target enemy');
+  assert.ok(despawnedNetIds.size > 0, 'ProjectileDespawned must be emitted when projectile hits target');
+});
+
+console.log('\nAll 8 co-op simulation test suites passed!');

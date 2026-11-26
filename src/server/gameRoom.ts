@@ -37,7 +37,7 @@ import {
 
 export const DEFAULT_RECONNECT_GRACE_MS = 20_000;
 const SNAPSHOT_BUFFER_BYTES = 16 * 1024;
-const EVENT_BUFFER_BYTES = 4 * 1024;
+const EVENT_BUFFER_BYTES = 8 * 1024;
 const MAX_WS_BUFFERED_BYTES = 64 * 1024;
 const MAX_CATCHUP_TICKS = 2;
 
@@ -914,7 +914,6 @@ export class GameRoom {
       switch (ev.type) {
         case 'AbilityFired': {
           const slotId = this.playerIdToSlot.get(ev.playerId) ?? 0;
-          const simPlayer = this.sim.getPlayer(ev.playerId);
           this.binaryEventsBuf.push({
             type: 'AbilityFired',
             playerId: slotId,
@@ -923,7 +922,49 @@ export class GameRoom {
             isDoubleCast: Boolean(ev.isDoubleCast),
             x: ev.x,
             y: ev.y,
-            aimAngle: simPlayer?.aimAngle ?? 0,
+            aimAngle: ev.aimAngle,
+          });
+          break;
+        }
+
+        case 'ProjectileSpawned': {
+          const slotId = ev.playerId ? this.playerIdToSlot.get(ev.playerId) ?? 0 : 0;
+          this.binaryEventsBuf.push({
+            type: 'ProjectileSpawned',
+            netId: ev.netId,
+            playerId: slotId,
+            sourceId: ev.sourceId,
+            spriteId: ev.spriteId,
+            x: ev.x,
+            y: ev.y,
+            vx: ev.vx,
+            vy: ev.vy,
+            radius: ev.radius,
+            scale: ev.scale,
+            spinSpeed: ev.spinSpeed,
+            lifeMs: Math.max(50, Math.round(ev.remainingLifeSec * 1000)),
+          });
+          break;
+        }
+
+        case 'ProjectileMoved': {
+          this.binaryEventsBuf.push({
+            type: 'ProjectileMoved',
+            netId: ev.netId,
+            x: ev.x,
+            y: ev.y,
+            vx: ev.vx,
+            vy: ev.vy,
+          });
+          break;
+        }
+
+        case 'ProjectileDespawned': {
+          this.binaryEventsBuf.push({
+            type: 'ProjectileDespawned',
+            netId: ev.netId,
+            x: ev.x,
+            y: ev.y,
           });
           break;
         }

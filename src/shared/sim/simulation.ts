@@ -144,6 +144,9 @@ export class GameSimulation {
   private nextEnemyId = 1;
   private nextPickupId = 1;
   private nextChoiceBatchId = 1;
+  private nextProjectileNetId = 1;
+  private readonly replicatedEnemyProjectiles = new Map<number, EnemyProjectile>();
+  private readonly seenEnemyProjIdsBuf = new Set<number>();
   private spawnAccumulator = 0;
   private overflowSpawnPressure = 0;
   private nextBossEncounterIndex = 0;
@@ -542,6 +545,18 @@ export class GameSimulation {
    * remaining connected players are downed.
    */
   public removePlayer(playerId: PlayerId): SimEvent[] {
+    const runner = this.abilityRunners.get(playerId);
+    if (runner && this.mode === 'coop') {
+      const stale = runner.drainReplicatedProjectiles();
+      for (let i = 0; i < stale.length; i++) {
+        this.emit({
+          type: 'ProjectileDespawned',
+          netId: stale[i].netId,
+          x: stale[i].x,
+          y: stale[i].y,
+        });
+      }
+    }
     this.players.delete(playerId);
     this.abilityRunners.delete(playerId);
 
@@ -563,6 +578,18 @@ export class GameSimulation {
     }
 
     return this.drainEvents();
+  }
+
+  private allocEnemyId(): number {
+    const id = this.nextEnemyId;
+    this.nextEnemyId = this.nextEnemyId >= 65535 ? 1 : this.nextEnemyId + 1;
+    return id;
+  }
+
+  private allocProjectileNetId(): number {
+    const id = this.nextProjectileNetId;
+    this.nextProjectileNetId = this.nextProjectileNetId >= 65535 ? 1 : this.nextProjectileNetId + 1;
+    return id;
   }
 
   // ==========================================================================
@@ -598,6 +625,9 @@ export class GameSimulation {
     this.nextEnemyId = 1;
     this.nextPickupId = 1;
     this.nextChoiceBatchId = 1;
+    this.nextProjectileNetId = 1;
+    this.replicatedEnemyProjectiles.clear();
+    this.seenEnemyProjIdsBuf.clear();
     this.spawnAccumulator = 0;
     this.overflowSpawnPressure = 0;
     this.nextBossEncounterIndex = 0;
@@ -1136,7 +1166,7 @@ export class GameSimulation {
     const nearest = this.findNearestAlivePlayer(x, y);
 
     const enemy: EnemyEntity = {
-      id: this.nextEnemyId++,
+      id: this.allocEnemyId(),
       archetypeId,
       isBoss: false,
       isElite,
@@ -1236,7 +1266,7 @@ export class GameSimulation {
     const perBossHp = isTwinMacarons ? Math.round(maxHp * 0.55) : maxHp;
 
     const boss: EnemyEntity = {
-      id: this.nextEnemyId++,
+      id: this.allocEnemyId(),
       archetypeId: 'golem',
       bossId: bossDef.id,
       isBoss: true,
@@ -1290,7 +1320,7 @@ export class GameSimulation {
       const ry = anchor.y + Math.sin(roseAngle) * spawnDist;
       const roseContactDmg = roseDef.contactDamage * getBossDamageScale(minutes, encounterIndex);
       const rose: EnemyEntity = {
-        id: this.nextEnemyId++,
+        id: this.allocEnemyId(),
         archetypeId: 'golem',
         bossId: roseDef.id,
         linkedBossId: boss.id,
@@ -2504,6 +2534,54 @@ export class GameSimulation {
         this.enemyProjectiles.splice(i, 1);
       }
     }
+
+    if (this.mode === 'coop') {
+      this.reconcileEnemyProjectiles();
+    }
+  }
+
+  private reconcileEnemyProjectiles(): void {
+    this.seenEnemyProjIdsBuf.clear();
+
+    for (let i = 0; i < this.enemyProjectiles.length; i++) {
+      const proj = this.enemyProjectiles[i];
+      if (proj.netId === undefined) {
+        const netId = this.allocProjectileNetId();
+        proj.netId = netId;
+        this.replicatedEnemyProjectiles.set(netId, proj);
+        this.seenEnemyProjIdsBuf.add(netId);
+        this.emit({
+          type: 'ProjectileSpawned',
+          netId,
+          playerId: '',
+          sourceId: 'fireball',
+          spriteId: 'enemy_orb',
+          kind: 'linear',
+          x: proj.x,
+          y: proj.y,
+          vx: proj.vx,
+          vy: proj.vy,
+          radius: proj.radius,
+          scale: Math.max(1.5, proj.radius / 4.2),
+          spinSpeed: 0,
+          remainingLifeSec: Math.max(0.1, proj.maxLife - proj.life),
+        });
+      } else {
+        this.seenEnemyProjIdsBuf.add(proj.netId);
+      }
+    }
+
+    for (const [netId, proj] of this.replicatedEnemyProjectiles) {
+      if (!this.seenEnemyProjIdsBuf.has(netId)) {
+        this.replicatedEnemyProjectiles.delete(netId);
+        this.emit({
+          type: 'ProjectileDespawned',
+          netId,
+          x: proj.x,
+          y: proj.y,
+        });
+      }
+    }
   }
 
   private updatePickups(dt: number): void {
@@ -2790,7 +2868,7 @@ export class GameSimulation {
         this.emit({ type: 'VfxText', x, y, text, color, isCrit }),
       addScreenShake: (intensity, durationSec) =>
         this.emit({ type: 'ScreenShake', intensity, durationSec }),
-      onAbilityFired: (abilityId, isSynergy, color, isDoubleCast) =>
+      onAbilityFired: (abilityId, isSynergy, color, isDoubleCast, aimAngle) =>
         this.emit({
           type: 'AbilityFired',
           playerId: player.id,
@@ -2800,7 +2878,46 @@ export class GameSimulation {
           y: player.y,
           color,
           isDoubleCast,
+          aimAngle,
         }),
+      ...(this.mode === 'coop'
+        ? {
+            allocProjectileNetId: () => this.allocProjectileNetId(),
+            onProjectileSpawned: (proj, netId) =>
+              this.emit({
+                type: 'ProjectileSpawned',
+                netId,
+                playerId: player.id,
+                sourceId: proj.sourceId,
+                spriteId: proj.spriteId,
+                kind: proj.kind,
+                x: proj.x,
+                y: proj.y,
+                vx: proj.vx,
+                vy: proj.vy,
+                radius: proj.radius,
+                scale: proj.scale,
+                spinSpeed: proj.spinSpeed,
+                remainingLifeSec: Math.max(0.08, proj.maxLife - proj.age),
+              }),
+            onProjectileMoved: (proj, netId) =>
+              this.emit({
+                type: 'ProjectileMoved',
+                netId,
+                x: proj.x,
+                y: proj.y,
+                vx: proj.vx,
+                vy: proj.vy,
+              }),
+            onProjectileDespawned: (netId, x, y) =>
+              this.emit({
+                type: 'ProjectileDespawned',
+                netId,
+                x,
+                y,
+              }),
+          }
+        : {}),
     };
   }
 

@@ -88,8 +88,13 @@ export interface CombatContext {
     abilityId: AbilityId | SynergyId,
     isSynergy: boolean,
     color: string,
-    isDoubleCast?: boolean
+    isDoubleCast: boolean,
+    aimAngle: number
   ) => void;
+  allocProjectileNetId?: () => number;
+  onProjectileSpawned?: (proj: ActiveProjectile, netId: number) => void;
+  onProjectileMoved?: (proj: ActiveProjectile, netId: number) => void;
+  onProjectileDespawned?: (netId: number, x: number, y: number) => void;
 }
 
 interface DelayedCast {
@@ -117,6 +122,8 @@ export class AbilityRunner {
 
   private castCounter = 0;
   private readonly queryBuf: EnemyEntity[] = [];
+  private readonly replicatedProjectiles = new Map<number, ActiveProjectile>();
+  private readonly seenNetIdsBuf = new Set<number>();
 
   public reset(): void {
     this.projectiles.length = 0;
@@ -132,6 +139,21 @@ export class AbilityRunner {
     this.totems.length = 0;
     this.delayedCasts.length = 0;
     this.castCounter = 0;
+    this.replicatedProjectiles.clear();
+    this.seenNetIdsBuf.clear();
+  }
+
+  /**
+   * Returns all currently replicated projectile netIds + last positions and clears the map
+   * (used when a player is removed mid-match so clients cleanly despawn their projectiles).
+   */
+  public drainReplicatedProjectiles(): Array<{ netId: number; x: number; y: number }> {
+    const out: Array<{ netId: number; x: number; y: number }> = [];
+    for (const [netId, proj] of this.replicatedProjectiles) {
+      out.push({ netId, x: proj.x, y: proj.y });
+    }
+    this.replicatedProjectiles.clear();
+    return out;
   }
 
   public getActiveTotems(): readonly ActiveTotem[] {
@@ -193,16 +215,16 @@ export class AbilityRunner {
           const stats = getAbilityStatsAtLevel(def, slot.level);
           const effectiveCd = Math.max(0.14, stats.cooldown * ctx.stats.cooldownMult);
           slot.cooldownTimer = effectiveCd;
-          this.castWithChronometer(ctx, def.id, false, def.color, () =>
-            this.executeAbility(def.id, stats, ctx)
+          this.castWithChronometer(ctx, def.id, false, def.color, (aimAngle) =>
+            this.executeAbility(def.id, stats, ctx, aimAngle)
           );
         } else {
           const syn = SYNERGIES[slot.id as SynergyId];
           const stats = syn.evolvedSpec.stats;
           const effectiveCd = Math.max(0.14, stats.cooldown * ctx.stats.cooldownMult);
           slot.cooldownTimer = effectiveCd;
-          this.castWithChronometer(ctx, syn.id, true, syn.color, () =>
-            this.executeSynergy(syn.id, stats, ctx)
+          this.castWithChronometer(ctx, syn.id, true, syn.color, (aimAngle) =>
+            this.executeSynergy(syn.id, stats, ctx, aimAngle)
           );
         }
       }
@@ -230,6 +252,64 @@ export class AbilityRunner {
     this.updateTrails(dt, ctx);
     this.updateZones(dt, ctx);
     this.updateTotems(dt, ctx);
+
+    // 4. Reconcile authoritative projectile replication events (co-op server only)
+    if (ctx.onProjectileSpawned && ctx.allocProjectileNetId) {
+      this.reconcileReplicatedProjectiles(ctx);
+    }
+  }
+
+  private reconcileReplicatedProjectiles(ctx: CombatContext): void {
+    const allocNetId = ctx.allocProjectileNetId!;
+    const onSpawned = ctx.onProjectileSpawned!;
+    const onMoved = ctx.onProjectileMoved;
+    const onDespawned = ctx.onProjectileDespawned;
+
+    this.seenNetIdsBuf.clear();
+
+    for (let i = 0; i < this.projectiles.length; i++) {
+      const proj = this.projectiles[i];
+      if (proj.netId === undefined) {
+        const netId = allocNetId();
+        proj.netId = netId;
+        proj.netX = proj.x;
+        proj.netY = proj.y;
+        proj.netVx = proj.vx;
+        proj.netVy = proj.vy;
+        proj.netAge = proj.age;
+        this.replicatedProjectiles.set(netId, proj);
+        this.seenNetIdsBuf.add(netId);
+        onSpawned(proj, netId);
+      } else {
+        this.seenNetIdsBuf.add(proj.netId);
+        if (onMoved) {
+          const elapsed = proj.age - (proj.netAge ?? proj.age);
+          const expectedX = (proj.netX ?? proj.x) + (proj.netVx ?? proj.vx) * elapsed;
+          const expectedY = (proj.netY ?? proj.y) + (proj.netVy ?? proj.vy) * elapsed;
+          const posErrSq = (proj.x - expectedX) ** 2 + (proj.y - expectedY) ** 2;
+          const velErrSq =
+            (proj.vx - (proj.netVx ?? proj.vx)) ** 2 + (proj.vy - (proj.netVy ?? proj.vy)) ** 2;
+
+          // Emit a compact trajectory correction when a homing/boomerang/ricochet/dash projectile
+          // deviates by > 8px from linear extrapolation or changes velocity by > 15 px/s.
+          if (posErrSq > 64 || velErrSq > 225) {
+            proj.netX = proj.x;
+            proj.netY = proj.y;
+            proj.netVx = proj.vx;
+            proj.netVy = proj.vy;
+            proj.netAge = proj.age;
+            onMoved(proj, proj.netId);
+          }
+        }
+      }
+    }
+
+    for (const [netId, proj] of this.replicatedProjectiles) {
+      if (!this.seenNetIdsBuf.has(netId)) {
+        this.replicatedProjectiles.delete(netId);
+        onDespawned?.(netId, proj.x, proj.y);
+      }
+    }
   }
 
   private castWithChronometer(
@@ -237,17 +317,19 @@ export class AbilityRunner {
     abilityId: AbilityId | SynergyId,
     isSynergy: boolean,
     color: string,
-    castFn: () => void
+    castFn: (aimAngle: number) => void
   ): void {
-    castFn();
-    ctx.onAbilityFired?.(abilityId, isSynergy, color, false);
+    const aimAngle = this.getAimAngle(ctx);
+    castFn(aimAngle);
+    ctx.onAbilityFired?.(abilityId, isSynergy, color, false, aimAngle);
     this.castCounter++;
     if (ctx.stats.hasDoubleCast && this.castCounter % 5 === 0) {
       this.delayedCasts.push({
         timer: 0.12,
         action: () => {
-          castFn();
-          ctx.onAbilityFired?.(abilityId, isSynergy, color, true);
+          const doubleAimAngle = this.getAimAngle(ctx);
+          castFn(doubleAimAngle);
+          ctx.onAbilityFired?.(abilityId, isSynergy, color, true, doubleAimAngle);
           ctx.spawnRingParticle(ctx.player.x, ctx.player.y, PALETTE.babyBlue, 38, 0.25);
         },
       });
@@ -309,14 +391,18 @@ export class AbilityRunner {
   // EXECUTION FOR ALL 30 BASE ABILITIES (EXHAUSTIVE)
   // ==========================================================================
 
-  private executeAbility(id: AbilityId, stats: AbilityStats, ctx: CombatContext): void {
+  private executeAbility(
+    id: AbilityId,
+    stats: AbilityStats,
+    ctx: CombatContext,
+    baseAngle: number
+  ): void {
     const p = ctx.player;
     const damage = stats.damage * ctx.stats.damageMult;
     const area = stats.area * ctx.stats.areaMult;
     const kb = (stats.knockback ?? 0) * ctx.stats.knockbackMult;
     const count = Math.max(1, stats.count + ctx.stats.projectileBonus);
     const pierce = stats.pierce >= 999 ? 999 : stats.pierce + ctx.stats.pierceBonus;
-    const baseAngle = this.getAimAngle(ctx);
 
     switch (id) {
       // ----------------------------------------------------------------------
@@ -1518,14 +1604,18 @@ export class AbilityRunner {
   // EXECUTION FOR ALL 15 EVOLVED SYNERGIES (EXHAUSTIVE)
   // ==========================================================================
 
-  private executeSynergy(id: SynergyId, stats: AbilityStats, ctx: CombatContext): void {
+  private executeSynergy(
+    id: SynergyId,
+    stats: AbilityStats,
+    ctx: CombatContext,
+    baseAngle: number
+  ): void {
     const p = ctx.player;
     const damage = stats.damage * ctx.stats.damageMult;
     const area = stats.area * ctx.stats.areaMult;
     const kb = (stats.knockback ?? 0) * ctx.stats.knockbackMult;
     const count = Math.max(1, stats.count + ctx.stats.projectileBonus);
     const pierce = stats.pierce >= 999 ? 999 : stats.pierce + ctx.stats.pierceBonus;
-    const baseAngle = this.getAimAngle(ctx);
 
     switch (id) {
       // ----------------------------------------------------------------------
