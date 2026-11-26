@@ -282,6 +282,16 @@ export class InputManager {
   }
 
   private readonly handleKeyDown = (e: KeyboardEvent): void => {
+    const target = e.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable)
+    ) {
+      return;
+    }
+
     this.callbacks.onUserGesture?.();
 
     if (

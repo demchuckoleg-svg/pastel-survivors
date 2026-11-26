@@ -15,6 +15,13 @@ function bootstrap(): void {
     onLevelUp: (choices) => ui?.handleLevelUp(choices),
     onBossChestCollected: (choices) => ui?.handleBossChestCollected(choices),
     onGameOver: (summary) => ui?.handleGameOver(summary),
+    onCoopConnectionChange: (conn) => ui?.handleCoopConnectionChange(conn),
+    onCoopRoomState: (roomState) => ui?.handleCoopRoomState(roomState),
+    onCoopUpgradeChoices: (upgrade) => ui?.handleCoopUpgradeChoices(upgrade),
+    onCoopPauseToggle: (open) => ui?.handleCoopPauseToggle(open),
+    onCoopMatchEnd: (summary) => ui?.handleCoopMatchEnd(summary),
+    onCoopError: (code, message) => ui?.handleCoopError(code, message),
+    onCoopReconnectFailed: (reason) => ui?.handleCoopReconnectFailed(reason),
   });
 
   ui = new UIManager(uiRoot, game);

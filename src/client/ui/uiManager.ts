@@ -6,28 +6,54 @@ import {
   MAX_ABILITY_LEVEL,
   MAX_ACTIVE_ABILITY_SLOTS,
 } from '@shared/data/classes';
-import { xpNeeded } from '@shared/data/enemies';
 import { getSynergiesForClass, SYNERGIES } from '@shared/data/synergies';
 import type { AbilityId, ArtifactDef, BossId, HeroId } from '@shared/data/types';
+import {
+  MAX_ROOM_PLAYERS,
+  ROOM_CODE_ALPHABET,
+  ROOM_CODE_LENGTH,
+  WirePlayerFlag,
+  type RoomStatePayload,
+} from '@shared/protocol';
+import type { RoomPaceMode, UpgradeChoiceIndex } from '@shared/sim/types';
 import type {
+  CoopMatchEndSummary,
+  CoopUpgradeState,
   GameEngine,
   GameState,
   LevelUpChoice,
   RunStatsSnapshot,
 } from '../engine/game';
-import { getAllBestRuns, getBestRun, resetSaveData, type AimMode } from '../engine/storage';
+import {
+  getAllBestRuns,
+  getBestRun,
+  getNickname,
+  getServerUrlOverride,
+  resetSaveData,
+  setNickname,
+  setServerUrlOverride,
+  type AimMode,
+} from '../engine/storage';
+import { resolveDefaultWsUrl, type NetConnectionState } from '../netClient';
 
 /**
  * Responsive 16x16 pastel pixel-art UI Manager:
- *  - Main Menu (Title -> Class Select, Records, Settings, How to Play)
- *  - In-game HUD (XP bar, timer, kills, tap-friendly buttons, Boss HP, Hero HP, 6-slot strip + Artifacts)
- *  - Level-Up & Boss Artifact Modals
- *  - Pause Menu (Live stats, Global Passives, Synergy Reference Panel, Exit Confirmation, Hidden Debug Tools)
- *  - Game Over Modal (Run summary & personal-best highlights)
+ *  - Main Menu (Title -> Solo Offline Class Select, Online Co-op Menu & Lobby, Records, Settings, How to Play)
+ *  - In-game HUD (Personal XP bar, Squad HUD, Reconnecting badge, timer, kills, Boss HP, Hero HP, 6-slot strip + Artifacts)
+ *  - Live Speed-Readable Upgrade Strip in Co-op (NO center modal) & Classic Level-Up / Artifact Modals in Solo
+ *  - Pause Menu (Live stats, Global Passives, Synergy Reference Panel, non-pausing LIVE MATCH badge in Co-op)
+ *  - Game Over & Co-op Match Summary Modals
  */
 
 type PauseMobileTab = 'stats' | 'synergies';
-type MenuView = 'title' | 'class_select' | 'records' | 'settings' | 'howto';
+type MenuView =
+  | 'title'
+  | 'class_select'
+  | 'coop_menu'
+  | 'coop_lobby'
+  | 'records'
+  | 'settings'
+  | 'howto';
 type PauseConfirmAction = 'restart' | 'menu' | null;
 
 function formatTime(totalSec: number): string {
@@ -57,11 +83,15 @@ export class UIManager {
 
   // Top-level layer containers
   private readonly hudLayer: HTMLDivElement;
+  private readonly liveUpgradeLayer: HTMLDivElement;
   private readonly menuLayer: HTMLDivElement;
   private readonly levelUpLayer: HTMLDivElement;
   private readonly artifactLayer: HTMLDivElement;
   private readonly pauseLayer: HTMLDivElement;
   private readonly gameOverLayer: HTMLDivElement;
+
+  // Cached hero icon data URLs for lightweight Squad HUD / Match Summary rendering
+  private readonly heroIconUrls: Record<HeroId, string>;
 
   // Cached HUD element references for zero-thrash updates
   private hudXpFill!: HTMLDivElement;
@@ -71,9 +101,12 @@ export class UIManager {
   private hudHeroName!: HTMLSpanElement;
   private hudHpNumbers!: HTMLSpanElement;
   private hudHpFill!: HTMLDivElement;
+  private hudSquadList!: HTMLDivElement;
   private hudTimer!: HTMLSpanElement;
   private hudKills!: HTMLSpanElement;
   private hudNextBoss!: HTMLDivElement;
+  private hudCoopMeta!: HTMLDivElement;
+  private hudReconnectBadge!: HTMLDivElement;
   private hudAimBtn!: HTMLButtonElement;
   private hudMuteBtn!: HTMLButtonElement;
   private hudPauseBtn!: HTMLButtonElement;
@@ -93,6 +126,8 @@ export class UIManager {
   // Dirty-checking cache for HUD DOM updates
   private lastSlotsKey = '';
   private lastArtifactsKey = '';
+  private lastSquadKey = '';
+  private lastCoopMetaText = '';
   private lastTimerText = '';
   private lastKillsCount = -1;
   private lastLevel = -1;
@@ -105,7 +140,7 @@ export class UIManager {
   private lastHudHeroId: HeroId | null = null;
   private lastBossSpriteKey = '';
 
-  // Menu, Pause & Debug UI state
+  // Menu, Co-op, Pause & Debug UI state
   private menuView: MenuView = 'title';
   private selectedHeroDetail: HeroId | null = null;
   private selectedAbilityDetail: AbilityId | null = null;
@@ -113,6 +148,19 @@ export class UIManager {
   private pauseTab: PauseMobileTab = 'stats';
   private pauseConfirmAction: PauseConfirmAction = null;
   private debugUnlocked = false;
+
+  // Co-op menu & lobby UI state
+  private coopNickname = getNickname();
+  private coopHeroId: HeroId = 'mage';
+  private coopJoinCode = '';
+  private coopServerOverride = getServerUrlOverride();
+  private coopServerPanelOpen = getServerUrlOverride().length > 0;
+  private coopErrorText = '';
+  private coopCopyFeedbackTimer: ReturnType<typeof setTimeout> | null = null;
+  private coopCodeCopied = false;
+  private coopRoomState: RoomStatePayload | null = null;
+  private coopConnectionState: NetConnectionState = 'disconnected';
+  private coopUpgradeState: CoopUpgradeState | null = null;
 
   // UI animation loop
   private rafId: number | null = null;
@@ -123,10 +171,19 @@ export class UIManager {
     this.root = root;
     this.game = game;
 
+    this.heroIconUrls = {
+      mage: this.game.sprites.heroes.mage[0].toDataURL(),
+      ranger: this.game.sprites.heroes.ranger[0].toDataURL(),
+      knight: this.game.sprites.heroes.knight[0].toDataURL(),
+    };
+
     this.root.innerHTML = '';
 
     this.hudLayer = document.createElement('div');
     this.hudLayer.className = 'hud-layer hidden';
+
+    this.liveUpgradeLayer = document.createElement('div');
+    this.liveUpgradeLayer.className = 'live-upgrade-layer hidden';
 
     this.menuLayer = document.createElement('div');
     this.menuLayer.className = 'modal-backdrop menu-backdrop hidden';
@@ -145,6 +202,7 @@ export class UIManager {
 
     this.root.append(
       this.hudLayer,
+      this.liveUpgradeLayer,
       this.menuLayer,
       this.levelUpLayer,
       this.artifactLayer,
@@ -166,6 +224,10 @@ export class UIManager {
       cancelAnimationFrame(this.rafId);
       this.rafId = null;
     }
+    if (this.coopCopyFeedbackTimer) {
+      clearTimeout(this.coopCopyFeedbackTimer);
+      this.coopCopyFeedbackTimer = null;
+    }
     window.removeEventListener('keydown', this.handleModalKeyDown);
     this.root.innerHTML = '';
   }
@@ -176,11 +238,15 @@ export class UIManager {
 
   public handleStateChange(state: GameState): void {
     if (state === 'menu') {
-      this.menuView = 'title';
+      if (!this.game.isCoopMode()) {
+        this.menuView = 'title';
+      }
       this.selectedHeroDetail = null;
       this.selectedAbilityDetail = null;
       this.confirmResetSave = false;
       this.pauseConfirmAction = null;
+      this.coopUpgradeState = null;
+      this.renderLiveUpgradeStrip();
       this.renderMainMenu();
     } else if (state === 'paused') {
       this.pauseConfirmAction = null;
@@ -198,11 +264,13 @@ export class UIManager {
   }
 
   public handleLevelUp(choices: readonly LevelUpChoice[]): void {
+    // Solo Offline center modal (never called in Co-op)
     this.renderLevelUpModal(choices);
     this.syncStateVisibility('levelup');
   }
 
   public handleBossChestCollected(choices: readonly ArtifactDef[]): void {
+    // Solo Offline center modal (never called in Co-op)
     this.renderArtifactModal(choices);
     this.syncStateVisibility('artifact');
   }
@@ -212,24 +280,94 @@ export class UIManager {
     this.syncStateVisibility('gameover');
   }
 
+  // Co-op callbacks
+  public handleCoopConnectionChange(conn: NetConnectionState): void {
+    this.coopConnectionState = conn;
+    this.hudReconnectBadge?.classList.toggle(
+      'hidden',
+      !(this.game.isCoopMode() && conn === 'reconnecting')
+    );
+
+    if (this.game.getState() === 'menu' && (this.menuView === 'coop_menu' || this.menuView === 'coop_lobby')) {
+      this.renderMainMenu();
+    }
+  }
+
+  public handleCoopRoomState(roomState: RoomStatePayload): void {
+    this.coopRoomState = roomState;
+    this.coopErrorText = '';
+    if (this.game.getState() === 'menu' && roomState.status === 'lobby') {
+      this.menuView = 'coop_lobby';
+      this.renderMainMenu();
+    }
+  }
+
+  public handleCoopUpgradeChoices(upgrade: CoopUpgradeState | null): void {
+    this.coopUpgradeState = upgrade;
+    this.renderLiveUpgradeStrip();
+    this.syncStateVisibility(this.game.getState());
+  }
+
+  public handleCoopPauseToggle(open: boolean): void {
+    this.pauseConfirmAction = null;
+    if (open) {
+      this.renderPauseModal();
+    }
+    this.syncStateVisibility(this.game.getState());
+  }
+
+  public handleCoopMatchEnd(summary: CoopMatchEndSummary): void {
+    this.coopUpgradeState = null;
+    this.renderLiveUpgradeStrip();
+    this.renderCoopMatchEndModal(summary);
+    this.syncStateVisibility('gameover');
+  }
+
+  public handleCoopError(_code: string, message: string): void {
+    this.coopErrorText = message;
+    if (this.game.getState() === 'menu') {
+      this.renderMainMenu();
+    }
+  }
+
+  public handleCoopReconnectFailed(reason: string): void {
+    this.coopErrorText = reason;
+    this.coopRoomState = null;
+    this.coopUpgradeState = null;
+    this.game.leaveCoopRoom();
+    this.menuView = 'coop_menu';
+    this.renderMainMenu();
+  }
+
   // ==========================================================================
   // LAYER VISIBILITY & KEYBOARD SHORTCUTS
   // ==========================================================================
 
   private syncStateVisibility(state: GameState): void {
+    const isCoop = this.game.isCoopMode();
     const showHud = state !== 'menu';
+    const showLiveStrip =
+      isCoop &&
+      state === 'playing' &&
+      this.coopUpgradeState !== null &&
+      this.coopUpgradeState.choices.length > 0;
+    const showPause =
+      (!isCoop && state === 'paused') ||
+      (isCoop && state === 'playing' && this.game.isCoopPauseOpen());
+
     this.hudLayer.classList.toggle('hidden', !showHud);
+    this.liveUpgradeLayer.classList.toggle('hidden', !showLiveStrip);
     this.menuLayer.classList.toggle('hidden', state !== 'menu');
-    this.levelUpLayer.classList.toggle('hidden', state !== 'levelup');
-    this.artifactLayer.classList.toggle('hidden', state !== 'artifact');
-    this.pauseLayer.classList.toggle('hidden', state !== 'paused');
+    this.levelUpLayer.classList.toggle('hidden', isCoop || state !== 'levelup');
+    this.artifactLayer.classList.toggle('hidden', isCoop || state !== 'artifact');
+    this.pauseLayer.classList.toggle('hidden', !showPause);
     this.gameOverLayer.classList.toggle('hidden', state !== 'gameover');
   }
 
   private toggleDebugUnlocked(): void {
     this.debugUnlocked = !this.debugUnlocked;
     const state = this.game.getState();
-    if (state === 'paused') {
+    if (state === 'paused' || this.game.isCoopPauseOpen()) {
       this.renderPauseModal();
     } else if (state === 'menu' && this.menuView === 'howto') {
       this.renderMainMenu();
@@ -237,6 +375,16 @@ export class UIManager {
   }
 
   private readonly handleModalKeyDown = (e: KeyboardEvent): void => {
+    const target = e.target as HTMLElement | null;
+    if (
+      target &&
+      (target.tagName === 'INPUT' ||
+        target.tagName === 'TEXTAREA' ||
+        target.isContentEditable)
+    ) {
+      return;
+    }
+
     const state = this.game.getState();
 
     // Hidden Debug Menu shortcut: Ctrl + Shift + D (or Cmd + Shift + D)
@@ -248,10 +396,25 @@ export class UIManager {
       return;
     }
 
-    if (state !== 'levelup' && state !== 'artifact') return;
+    const idx: UpgradeChoiceIndex | null =
+      e.key === '1' ? 0 : e.key === '2' ? 1 : e.key === '3' ? 2 : null;
+    if (idx === null) return;
 
-    const idx = e.key === '1' ? 0 : e.key === '2' ? 1 : e.key === '3' ? 2 : -1;
-    if (idx < 0) return;
+    // Co-op Live Speed-Readable Upgrade Strip hotkeys (1/2/3 without interrupting WASD!)
+    if (
+      this.game.isCoopMode() &&
+      state === 'playing' &&
+      !e.repeat &&
+      this.coopUpgradeState &&
+      this.coopUpgradeState.choices[idx]
+    ) {
+      e.preventDefault();
+      this.game.pickCoopUpgrade(idx);
+      this.renderLiveUpgradeStrip();
+      return;
+    }
+
+    if (state !== 'levelup' && state !== 'artifact') return;
 
     if (state === 'levelup') {
       const choices = this.game.getPendingLevelUpChoices();
@@ -285,6 +448,12 @@ export class UIManager {
       case 'class_select':
         this.renderClassSelectView();
         break;
+      case 'coop_menu':
+        this.renderCoopMenuView();
+        break;
+      case 'coop_lobby':
+        this.renderCoopLobbyView();
+        break;
       case 'records':
         this.renderRecordsView();
         break;
@@ -313,6 +482,10 @@ export class UIManager {
       this.confirmResetSave = false;
       this.selectedHeroDetail = null;
       this.selectedAbilityDetail = null;
+      this.coopErrorText = '';
+      if (this.game.isCoopMode()) {
+        this.game.leaveCoopRoom();
+      }
       this.menuView = 'title';
       this.renderMainMenu();
     });
@@ -327,18 +500,23 @@ export class UIManager {
         <div class="title-screen">
           <div class="title-badge-pill">16x16 PIXEL-ART ROGUELITE</div>
           <h1 class="menu-title title-main-heading">PASTEL SURVIVORS</h1>
-          <p class="menu-subtitle">3 Heroes • 30 Abilities • 15 Synergies • 3 Bosses • 9 Artifacts</p>
+          <p class="menu-subtitle">3 Heroes • 30 Abilities • 15 Synergies • 3 Bosses • 1–4P Co-op</p>
 
           <div class="title-nav-stack">
             <button type="button" class="px-btn px-btn-primary title-nav-btn title-play-btn" data-menu-nav="class_select">
-              PLAY
+              SOLO OFFLINE
             </button>
-            <button type="button" class="px-btn px-btn-lavender title-nav-btn" data-menu-nav="records">
-              RECORDS
+            <button type="button" class="px-btn px-btn-lavender title-nav-btn title-play-btn" data-menu-nav="coop_menu">
+              ONLINE CO-OP (1–4P)
             </button>
-            <button type="button" class="px-btn px-btn-blue title-nav-btn" data-menu-nav="settings">
-              SETTINGS
-            </button>
+            <div class="title-secondary-row">
+              <button type="button" class="px-btn px-btn-butter title-nav-btn" data-menu-nav="records">
+                RECORDS
+              </button>
+              <button type="button" class="px-btn px-btn-blue title-nav-btn" data-menu-nav="settings">
+                SETTINGS
+              </button>
+            </div>
             <button type="button" class="px-btn px-btn-peach title-nav-btn" data-menu-nav="howto">
               HOW TO PLAY
             </button>
@@ -361,9 +539,477 @@ export class UIManager {
         this.confirmResetSave = false;
         this.selectedHeroDetail = null;
         this.selectedAbilityDetail = null;
+        this.coopErrorText = '';
         this.menuView = target;
         this.renderMainMenu();
       });
+    });
+  }
+
+  private renderCoopMenuView(): void {
+    const isConnecting = this.coopConnectionState === 'connecting';
+    const defaultUrl = resolveDefaultWsUrl();
+
+    const heroPillsHtml = CLASS_LIST.map((cls) => {
+      const selected = this.coopHeroId === cls.id;
+      return `
+        <button
+          type="button"
+          class="coop-hero-pill ${selected ? 'selected' : ''}"
+          data-coop-pick-hero="${cls.id}"
+          style="--hero-accent:${cls.accentColor}"
+        >
+          <canvas class="coop-hero-pill-canvas pixel-art" width="16" height="16" data-hero-preview="${cls.id}"></canvas>
+          <span>${escapeHtml(cls.name)}</span>
+        </button>
+      `;
+    }).join('');
+
+    this.menuLayer.innerHTML = `
+      <div class="modal-card subview-compact-card">
+        <div class="menu-header">
+          <div class="subview-title-row">
+            <button type="button" class="px-btn" data-menu-back>← BACK</button>
+            <div class="menu-title-block">
+              <h1 class="menu-title">ONLINE CO-OP</h1>
+              <p class="menu-subtitle">Team up with up to 4 friends — live personal upgrades, shared bosses & revives</p>
+            </div>
+          </div>
+        </div>
+
+        ${
+          this.coopErrorText
+            ? `<div class="coop-error-banner" role="alert">${escapeHtml(this.coopErrorText)}</div>`
+            : ''
+        }
+
+        <div class="coop-form-card">
+          <div class="coop-field-row">
+            <label class="coop-field-label" for="coop-nickname-input">PLAYER NICKNAME</label>
+            <input
+              id="coop-nickname-input"
+              type="text"
+              class="px-input"
+              maxlength="20"
+              placeholder="e.g. MochiMage"
+              value="${escapeHtml(this.coopNickname)}"
+              autocomplete="nickname"
+              data-coop-nickname
+            />
+          </div>
+
+          <div class="coop-field-row">
+            <span class="coop-field-label">STARTING HERO (CAN CHANGE IN LOBBY)</span>
+            <div class="coop-hero-strip">
+              ${heroPillsHtml}
+            </div>
+          </div>
+        </div>
+
+        <div class="coop-actions-grid">
+          <div class="coop-action-box">
+            <h3 class="coop-action-title">HOST A NEW ROOM</h3>
+            <p class="coop-action-desc">Generate a 4-character Room Code and pick pace mode in the lobby.</p>
+            <button
+              type="button"
+              class="px-btn px-btn-primary coop-big-btn"
+              data-coop-create
+              ${isConnecting ? 'disabled' : ''}
+            >
+              ${isConnecting ? 'CONNECTING...' : 'CREATE ROOM'}
+            </button>
+          </div>
+
+          <div class="coop-action-box">
+            <h3 class="coop-action-title">JOIN BY ROOM CODE</h3>
+            <p class="coop-action-desc">Enter your host's 4-letter Room Code to join their squad.</p>
+            <div class="coop-join-row">
+              <input
+                type="text"
+                class="px-input coop-code-input"
+                maxlength="${ROOM_CODE_LENGTH}"
+                placeholder="ABCD"
+                value="${escapeHtml(this.coopJoinCode)}"
+                spellcheck="false"
+                autocapitalize="characters"
+                data-coop-code-input
+              />
+              <button
+                type="button"
+                class="px-btn px-btn-lavender coop-big-btn"
+                data-coop-join
+                ${isConnecting ? 'disabled' : ''}
+              >
+                ${isConnecting ? '...' : 'JOIN ROOM'}
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <details class="coop-server-details" ${this.coopServerPanelOpen ? 'open' : ''} data-coop-server-details>
+          <summary class="coop-server-summary">
+            <span>Server URL Override (Optional / Mobile Testing)</span>
+            <span class="px-pill">${this.coopServerOverride ? 'CUSTOM' : 'DEFAULT'}</span>
+          </summary>
+          <div class="coop-server-body">
+            <div class="coop-server-default-hint">Default: <code>${escapeHtml(defaultUrl)}</code></div>
+            <div class="coop-server-input-row">
+              <input
+                type="url"
+                class="px-input"
+                placeholder="${escapeHtml(defaultUrl)}"
+                value="${escapeHtml(this.coopServerOverride)}"
+                spellcheck="false"
+                data-coop-server-input
+              />
+              <button type="button" class="px-btn" data-coop-server-reset>RESET</button>
+            </div>
+          </div>
+        </details>
+      </div>
+    `;
+
+    this.bindMenuPreviews();
+    this.bindBackToTitle();
+
+    const nickInput = this.menuLayer.querySelector<HTMLInputElement>('[data-coop-nickname]');
+    nickInput?.addEventListener('input', () => {
+      this.coopNickname = nickInput.value.slice(0, 20);
+      setNickname(this.coopNickname);
+    });
+
+    const heroBtns = this.menuLayer.querySelectorAll<HTMLButtonElement>('[data-coop-pick-hero]');
+    heroBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.game.audio.unlock();
+        this.game.audio.playClick();
+        this.coopHeroId = btn.dataset.coopPickHero as HeroId;
+        heroBtns.forEach((b) =>
+          b.classList.toggle('selected', b.dataset.coopPickHero === this.coopHeroId)
+        );
+      });
+    });
+
+    const codeInput = this.menuLayer.querySelector<HTMLInputElement>('[data-coop-code-input]');
+    codeInput?.addEventListener('input', () => {
+      const cleaned = codeInput.value
+        .toUpperCase()
+        .split('')
+        .filter((ch) => ROOM_CODE_ALPHABET.includes(ch))
+        .join('')
+        .slice(0, ROOM_CODE_LENGTH);
+      codeInput.value = cleaned;
+      this.coopJoinCode = cleaned;
+    });
+    codeInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && this.coopJoinCode.length === ROOM_CODE_LENGTH) {
+        this.triggerJoinRoom();
+      }
+    });
+
+    const detailsEl = this.menuLayer.querySelector<HTMLDetailsElement>('[data-coop-server-details]');
+    detailsEl?.addEventListener('toggle', () => {
+      this.coopServerPanelOpen = detailsEl.open;
+    });
+
+    const serverInput = this.menuLayer.querySelector<HTMLInputElement>('[data-coop-server-input]');
+    serverInput?.addEventListener('input', () => {
+      this.coopServerOverride = serverInput.value.trim();
+      setServerUrlOverride(this.coopServerOverride);
+    });
+
+    this.menuLayer.querySelector('[data-coop-server-reset]')?.addEventListener('click', () => {
+      this.game.audio.playClick();
+      this.coopServerOverride = '';
+      setServerUrlOverride('');
+      if (serverInput) serverInput.value = '';
+      this.renderMainMenu();
+    });
+
+    this.menuLayer.querySelector('[data-coop-create]')?.addEventListener('click', () => {
+      this.game.audio.unlock();
+      this.game.audio.playClick();
+      this.coopErrorText = '';
+      setNickname(this.coopNickname);
+      this.game.createCoopRoom({
+        heroId: this.coopHeroId,
+        paceMode: 'coop_pace',
+        name: this.coopNickname || undefined,
+        serverUrl: this.coopServerOverride || undefined,
+      });
+    });
+
+    this.menuLayer.querySelector('[data-coop-join]')?.addEventListener('click', () => {
+      this.triggerJoinRoom();
+    });
+  }
+
+  private triggerJoinRoom(): void {
+    this.game.audio.unlock();
+    this.game.audio.playClick();
+    this.coopErrorText = '';
+    setNickname(this.coopNickname);
+    this.game.joinCoopRoom({
+      roomCode: this.coopJoinCode,
+      heroId: this.coopHeroId,
+      name: this.coopNickname || undefined,
+      serverUrl: this.coopServerOverride || undefined,
+    });
+  }
+
+  private renderCoopLobbyView(): void {
+    const room = this.coopRoomState ?? this.game.getCoopRoomState();
+    if (!room) {
+      this.menuView = 'coop_menu';
+      this.renderCoopMenuView();
+      return;
+    }
+
+    const myPlayerId = this.game.net.getPlayerId();
+    const isHost = this.game.net.getIsHost();
+    const myEntry = room.players.find((p) => p.playerId === myPlayerId);
+    const myHeroId: HeroId = myEntry?.heroId ?? this.coopHeroId;
+    const myReady = myEntry?.ready ?? false;
+
+    const allOthersReady = room.players.every((p) => p.isHost || p.ready);
+    const isSoloTestStart = room.players.length === 1;
+    const canStartMatch = isHost && (isSoloTestStart || allOthersReady);
+
+    const slotsHtml: string[] = [];
+    for (let slotNum = 1; slotNum <= MAX_ROOM_PLAYERS; slotNum++) {
+      const player = room.players.find((p) => p.slotId === slotNum);
+      if (player) {
+        const cls = CLASSES[player.heroId];
+        const isMe = player.playerId === myPlayerId;
+        const readyBadge = player.ready
+          ? `<span class="lobby-ready-badge ready">✓ READY</span>`
+          : player.isHost && isSoloTestStart
+          ? `<span class="lobby-ready-badge host-solo">READY TO TEST</span>`
+          : `<span class="lobby-ready-badge waiting">NOT READY</span>`;
+
+        slotsHtml.push(`
+          <div class="lobby-slot filled ${isMe ? 'is-me' : ''} ${player.ready ? 'is-ready' : ''}">
+            <div class="lobby-slot-avatar" style="background:${cls.accentColor}">
+              <canvas class="lobby-slot-canvas pixel-art" width="16" height="16" data-hero-preview="${player.heroId}"></canvas>
+            </div>
+            <div class="lobby-slot-info">
+              <div class="lobby-slot-name-row">
+                <span class="lobby-slot-name">${escapeHtml(player.name)}</span>
+                ${isMe ? '<span class="px-pill lobby-you-pill">YOU</span>' : ''}
+                ${player.isHost ? '<span class="px-pill lobby-host-pill">★ HOST</span>' : ''}
+              </div>
+              <div class="lobby-slot-class">${escapeHtml(cls.name)} — ${escapeHtml(cls.title)}</div>
+              <div class="lobby-slot-status-row">
+                ${readyBadge}
+                ${!player.connected ? '<span class="px-pill" style="background:var(--coral)">DC</span>' : ''}
+              </div>
+            </div>
+          </div>
+        `);
+      } else {
+        slotsHtml.push(`
+          <div class="lobby-slot empty">
+            <div class="lobby-slot-empty-num">P${slotNum}</div>
+            <div class="lobby-slot-empty-text">WAITING FOR PLAYER...</div>
+          </div>
+        `);
+      }
+    }
+
+    const classPickerHtml = CLASS_LIST.map((cls) => {
+      const selected = myHeroId === cls.id;
+      return `
+        <button
+          type="button"
+          class="coop-hero-pill ${selected ? 'selected' : ''}"
+          data-lobby-class="${cls.id}"
+          style="--hero-accent:${cls.accentColor}"
+        >
+          <canvas class="coop-hero-pill-canvas pixel-art" width="16" height="16" data-hero-preview="${cls.id}"></canvas>
+          <span>${escapeHtml(cls.name)}</span>
+        </button>
+      `;
+    }).join('');
+
+    const paceHtml = isHost
+      ? `
+        <div class="lobby-pace-toggle">
+          <button
+            type="button"
+            class="px-btn ${room.paceMode === 'coop_pace' ? 'px-btn-primary' : ''}"
+            data-lobby-pace="coop_pace"
+          >
+            CO-OP 20M
+          </button>
+          <button
+            type="button"
+            class="px-btn ${room.paceMode === 'standard' ? 'px-btn-blue' : ''}"
+            data-lobby-pace="standard"
+          >
+            STANDARD 30M
+          </button>
+        </div>
+      `
+      : `
+        <span class="px-pill" style="background:${room.paceMode === 'coop_pace' ? 'var(--mint)' : 'var(--baby-blue)'}">
+          PACE: ${room.paceMode === 'coop_pace' ? 'CO-OP 20M' : 'STANDARD 30M'}
+        </span>
+      `;
+
+    this.menuLayer.innerHTML = `
+      <div class="modal-card subview-compact-card">
+        <div class="menu-header">
+          <div class="subview-title-row">
+            <button type="button" class="px-btn px-btn-coral" data-lobby-leave>← LEAVE</button>
+            <div class="menu-title-block">
+              <h1 class="menu-title">CO-OP LOBBY</h1>
+              <p class="menu-subtitle">${room.players.length}/${MAX_ROOM_PLAYERS} Players Joined</p>
+            </div>
+          </div>
+
+          <div class="lobby-code-card">
+            <span class="lobby-code-label">ROOM CODE</span>
+            <span class="lobby-code-value">${escapeHtml(room.roomCode)}</span>
+            <button type="button" class="px-btn px-btn-butter lobby-copy-btn" data-lobby-copy>
+              ${this.coopCodeCopied ? '✓ COPIED!' : 'COPY CODE'}
+            </button>
+          </div>
+        </div>
+
+        ${
+          this.coopErrorText
+            ? `<div class="coop-error-banner" role="alert">${escapeHtml(this.coopErrorText)}</div>`
+            : ''
+        }
+
+        <div class="lobby-slots-grid">
+          ${slotsHtml.join('')}
+        </div>
+
+        <div class="lobby-controls-bar">
+          <div class="lobby-control-group">
+            <span class="coop-field-label">YOUR HERO</span>
+            <div class="coop-hero-strip">
+              ${classPickerHtml}
+            </div>
+          </div>
+
+          <div class="lobby-control-group">
+            <span class="coop-field-label">MATCH PACE</span>
+            ${paceHtml}
+          </div>
+        </div>
+
+        <div class="lobby-footer">
+          <button
+            type="button"
+            class="px-btn ${myReady ? 'px-btn-primary' : 'px-btn-butter'} lobby-action-btn"
+            data-lobby-ready
+          >
+            ${myReady ? '✓ READY (TAP TO UNREADY)' : 'READY UP'}
+          </button>
+
+          ${
+            isHost
+              ? `
+            <button
+              type="button"
+              class="px-btn px-btn-lavender lobby-action-btn lobby-start-btn"
+              data-lobby-start
+              ${canStartMatch ? '' : 'disabled'}
+            >
+              ${isSoloTestStart ? 'START SOLO CO-OP TEST' : 'START MATCH'}
+            </button>
+          `
+              : `<div class="lobby-wait-note">Waiting for Host to start the match...</div>`
+          }
+        </div>
+        ${
+          isHost && !canStartMatch
+            ? `<div class="lobby-hint-line">All joined teammates must click Ready before starting.</div>`
+            : isHost && isSoloTestStart
+            ? `<div class="lobby-hint-line">Share code <strong>${escapeHtml(room.roomCode)}</strong> for up to 4 players, or start now for 1-player online testing.</div>`
+            : ''
+        }
+      </div>
+    `;
+
+    this.bindMenuPreviews();
+
+    this.menuLayer.querySelector('[data-lobby-leave]')?.addEventListener('click', () => {
+      this.game.audio.unlock();
+      this.game.audio.playClick();
+      this.coopRoomState = null;
+      this.coopErrorText = '';
+      this.game.leaveCoopRoom();
+      this.menuView = 'coop_menu';
+      this.renderMainMenu();
+    });
+
+    this.menuLayer.querySelector('[data-lobby-copy]')?.addEventListener('click', () => {
+      this.game.audio.unlock();
+      this.game.audio.playClick();
+      const code = room.roomCode;
+      if (navigator.clipboard?.writeText) {
+        void navigator.clipboard.writeText(code).catch(() => {});
+      } else {
+        const temp = document.createElement('textarea');
+        temp.value = code;
+        temp.style.position = 'fixed';
+        temp.style.opacity = '0';
+        document.body.appendChild(temp);
+        temp.select();
+        try {
+          document.execCommand('copy');
+        } catch {
+          // Ignore fallback errors
+        }
+        document.body.removeChild(temp);
+      }
+      this.coopCodeCopied = true;
+      if (this.coopCopyFeedbackTimer) clearTimeout(this.coopCopyFeedbackTimer);
+      this.coopCopyFeedbackTimer = setTimeout(() => {
+        this.coopCodeCopied = false;
+        if (this.menuView === 'coop_lobby' && this.game.getState() === 'menu') {
+          this.renderMainMenu();
+        }
+      }, 1800);
+      this.renderMainMenu();
+    });
+
+    const classBtns = this.menuLayer.querySelectorAll<HTMLButtonElement>('[data-lobby-class]');
+    classBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const heroId = btn.dataset.lobbyClass as HeroId;
+        this.coopHeroId = heroId;
+        this.game.audio.unlock();
+        this.game.audio.playClick();
+        this.game.net.selectClass(heroId);
+      });
+    });
+
+    const paceBtns = this.menuLayer.querySelectorAll<HTMLButtonElement>('[data-lobby-pace]');
+    paceBtns.forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const pace = btn.dataset.lobbyPace as RoomPaceMode;
+        this.game.audio.unlock();
+        this.game.audio.playClick();
+        this.game.net.setPaceMode(pace);
+      });
+    });
+
+    this.menuLayer.querySelector('[data-lobby-ready]')?.addEventListener('click', () => {
+      this.game.audio.unlock();
+      this.game.audio.playClick();
+      this.game.net.toggleReady();
+    });
+
+    this.menuLayer.querySelector('[data-lobby-start]')?.addEventListener('click', () => {
+      if (!canStartMatch) return;
+      this.game.audio.unlock();
+      this.game.audio.playClick();
+      this.coopErrorText = '';
+      this.game.net.startMatch();
     });
   }
 
@@ -934,6 +1580,7 @@ export class UIManager {
                 </div>
               </div>
             </div>
+            <div class="hud-squad-list hidden" data-hud-squad></div>
           </div>
 
           <div class="hud-center-col">
@@ -941,13 +1588,17 @@ export class UIManager {
               <span class="hud-timer" data-hud-timer>00:00</span>
               <span class="hud-kills" data-hud-kills>0 KILLS</span>
             </div>
-            <div class="hud-next-boss" data-hud-next-boss>BOSS IN 10:00</div>
+            <div class="hud-meta-pills">
+              <div class="hud-next-boss" data-hud-next-boss>BOSS IN 10:00</div>
+              <div class="hud-coop-meta hidden" data-hud-coop-meta></div>
+              <div class="hud-reconnect-badge hidden" data-hud-reconnect>RECONNECTING...</div>
+            </div>
           </div>
 
           <div class="hud-right-col">
             <button type="button" class="px-btn hud-icon-btn" data-hud-aim title="Toggle Aim Mode (M)">AUTO</button>
             <button type="button" class="px-btn hud-icon-btn" data-hud-mute title="Toggle Sound">SFX</button>
-            <button type="button" class="px-btn px-btn-lavender hud-icon-btn" data-hud-pause title="Pause (ESC / P)">II</button>
+            <button type="button" class="px-btn px-btn-lavender hud-icon-btn" data-hud-pause title="Pause / Build (ESC / P)">II</button>
           </div>
         </div>
 
@@ -982,9 +1633,12 @@ export class UIManager {
     this.hudHeroName = this.hudLayer.querySelector('[data-hud-hero-name]')!;
     this.hudHpNumbers = this.hudLayer.querySelector('[data-hud-hp-num]')!;
     this.hudHpFill = this.hudLayer.querySelector('[data-hud-hp-fill]')!;
+    this.hudSquadList = this.hudLayer.querySelector('[data-hud-squad]')!;
     this.hudTimer = this.hudLayer.querySelector('[data-hud-timer]')!;
     this.hudKills = this.hudLayer.querySelector('[data-hud-kills]')!;
     this.hudNextBoss = this.hudLayer.querySelector('[data-hud-next-boss]')!;
+    this.hudCoopMeta = this.hudLayer.querySelector('[data-hud-coop-meta]')!;
+    this.hudReconnectBadge = this.hudLayer.querySelector('[data-hud-reconnect]')!;
     this.hudAimBtn = this.hudLayer.querySelector('[data-hud-aim]')!;
     this.hudMuteBtn = this.hudLayer.querySelector('[data-hud-mute]')!;
     this.hudPauseBtn = this.hudLayer.querySelector('[data-hud-pause]')!;
@@ -1024,6 +1678,8 @@ export class UIManager {
   private resetHudCaches(): void {
     this.lastSlotsKey = '';
     this.lastArtifactsKey = '';
+    this.lastSquadKey = '';
+    this.lastCoopMetaText = '';
     this.lastTimerText = '';
     this.lastKillsCount = -1;
     this.lastLevel = -1;
@@ -1075,41 +1731,123 @@ export class UIManager {
   }
 
   private updateHud(force = false): void {
-    const p = this.game.player;
-    const needed = xpNeeded(p.level);
-    const xpRatio = Math.max(0, Math.min(1, p.xp / Math.max(1, needed)));
+    const isCoop = this.game.isCoopMode();
+    const heroId = this.game.getLocalHeroId();
+    const level = this.game.getLocalLevel();
+    const xpState = this.game.getLocalXp();
+    const xpRatio = Math.max(0, Math.min(1, xpState.xp / Math.max(1, xpState.xpToNext)));
     const xpPctRounded = Math.round(xpRatio * 1000) / 10;
 
-    if (force || p.level !== this.lastLevel || xpPctRounded !== this.lastXpRatio) {
-      this.lastLevel = p.level;
+    if (force || level !== this.lastLevel || xpPctRounded !== this.lastXpRatio) {
+      this.lastLevel = level;
       this.lastXpRatio = xpPctRounded;
-      this.hudLevelBadge.textContent = `LV ${p.level}`;
+      this.hudLevelBadge.textContent = `LV ${level}`;
       this.hudXpFill.style.width = `${xpPctRounded}%`;
-      this.hudXpText.textContent = `${Math.floor(p.xp)} / ${needed} XP`;
+      this.hudXpText.textContent = `${Math.floor(xpState.xp)} / ${xpState.xpToNext} XP`;
     }
 
     // Hero HP & mini portrait
-    const hpCur = Math.max(0, Math.ceil(p.hp));
-    const hpMax = Math.max(1, Math.round(p.maxHp));
-    const hpKey = `${p.heroId}:${hpCur}/${hpMax}`;
+    const hpState = this.game.getLocalHp();
+    const hpKey = `${heroId}:${hpState.hp}/${hpState.maxHp}:${hpState.downed}:${hpState.revivePct}`;
     if (force || hpKey !== this.lastHpKey) {
       this.lastHpKey = hpKey;
-      const ratio = Math.max(0, Math.min(1, p.hp / hpMax));
-      this.hudHeroName.textContent = CLASSES[p.heroId].name.toUpperCase();
-      this.hudHpNumbers.textContent = `${hpCur}/${hpMax}`;
+      const ratio = hpState.downed ? 0 : Math.max(0, Math.min(1, hpState.hpPct / 100));
+      this.hudHeroName.textContent = CLASSES[heroId].name.toUpperCase();
+      this.hudHpNumbers.textContent = hpState.downed
+        ? hpState.revivePct > 0
+          ? `REV ${hpState.revivePct}%`
+          : 'DOWNED'
+        : `${hpState.hp}/${hpState.maxHp}`;
       this.hudHpFill.style.width = `${Math.round(ratio * 100)}%`;
       this.hudHpFill.classList.toggle('low', ratio <= 0.35);
     }
 
-    const walkFrame = p.isMoving ? (Math.floor(p.walkTime * 7) % 2) : 0;
-    if (force || walkFrame !== this.lastHudHeroFrame || p.heroId !== this.lastHudHeroId) {
+    const walk = this.game.getLocalWalkState();
+    const walkFrame = walk.isMoving ? Math.floor(walk.walkTime * 7) % 2 : 0;
+    if (force || walkFrame !== this.lastHudHeroFrame || heroId !== this.lastHudHeroId) {
       this.lastHudHeroFrame = walkFrame;
-      this.lastHudHeroId = p.heroId;
+      this.lastHudHeroId = heroId;
       const hctx = this.hudHeroCanvas.getContext('2d');
       if (hctx) {
         hctx.imageSmoothingEnabled = false;
         hctx.clearRect(0, 0, 16, 16);
-        hctx.drawImage(this.game.sprites.heroes[p.heroId][walkFrame], 0, 0, 16, 16);
+        hctx.drawImage(this.game.sprites.heroes[heroId][walkFrame], 0, 0, 16, 16);
+      }
+    }
+
+    // Compact Co-op Squad HUD (teammates' class icons, levels, mini HP bars, downed/upgrading status)
+    if (isCoop) {
+      const teammates = this.game.getCoopPlayers().filter((p) => !p.isLocal);
+      const squadKey = teammates
+        .map(
+          (t) =>
+            `${t.id}:${t.classId}:${t.name}:${t.level}:${t.hpPct}:${t.stateFlags}:${t.revivePct}`
+        )
+        .join('|');
+      if (force || squadKey !== this.lastSquadKey) {
+        this.lastSquadKey = squadKey;
+        this.hudSquadList.classList.toggle('hidden', teammates.length === 0);
+        if (teammates.length > 0) {
+          this.hudSquadList.innerHTML = teammates
+            .map((t) => {
+              const isDowned = (t.stateFlags & WirePlayerFlag.DOWNED) !== 0;
+              const isUpgrading = (t.stateFlags & WirePlayerFlag.UPGRADING) !== 0;
+              const isDc = (t.stateFlags & WirePlayerFlag.DISCONNECTED) !== 0;
+              const cls = CLASSES[t.classId];
+              const fillPct = isDowned ? t.revivePct : Math.max(0, Math.min(100, t.hpPct));
+              const fillClass = isDowned ? 'reviving' : t.hpPct <= 35 ? 'low' : '';
+              const statusPill = isDowned
+                ? `<span class="squad-status downed">${t.revivePct > 0 ? `${t.revivePct}%` : 'GHOST'}</span>`
+                : isUpgrading
+                ? `<span class="squad-status upgrading" title="Choosing Upgrade">▲</span>`
+                : isDc
+                ? `<span class="squad-status dc">DC</span>`
+                : '';
+
+              return `
+                <div class="hud-squad-row ${isDowned ? 'downed' : ''}">
+                  <div class="squad-icon-box" style="background:${cls.accentColor}">
+                    <img class="pixel-art" src="${this.heroIconUrls[t.classId]}" alt="${escapeHtml(cls.name)}" />
+                  </div>
+                  <div class="squad-info">
+                    <div class="squad-top">
+                      <span class="squad-name">${escapeHtml(t.name.slice(0, 10))}</span>
+                      <span class="squad-lv">L${t.level}</span>
+                      ${statusPill}
+                    </div>
+                    <div class="squad-hp-track">
+                      <div class="squad-hp-fill ${fillClass}" style="width:${fillPct}%"></div>
+                    </div>
+                  </div>
+                </div>
+              `;
+            })
+            .join('');
+        } else {
+          this.hudSquadList.innerHTML = '';
+        }
+      }
+
+      const roomCode = this.game.net.getRoomCode();
+      const rtt = this.game.net.getRttMs();
+      const metaText = roomCode ? (rtt > 0 ? `${roomCode} · ${rtt}ms` : roomCode) : '';
+      if (force || metaText !== this.lastCoopMetaText) {
+        this.lastCoopMetaText = metaText;
+        this.hudCoopMeta.classList.toggle('hidden', !metaText);
+        this.hudCoopMeta.textContent = metaText;
+      }
+
+      this.hudReconnectBadge.classList.toggle(
+        'hidden',
+        this.game.getCoopConnectionState() !== 'reconnecting'
+      );
+    } else {
+      if (force || this.lastSquadKey !== 'SOLO') {
+        this.lastSquadKey = 'SOLO';
+        this.hudSquadList.classList.add('hidden');
+        this.hudSquadList.innerHTML = '';
+        this.hudCoopMeta.classList.add('hidden');
+        this.hudReconnectBadge.classList.add('hidden');
       }
     }
 
@@ -1155,7 +1893,9 @@ export class UIManager {
         const pct = Math.max(0, Math.min(100, (bossInfo.hp / maxInt) * 100));
         this.hudBossFill.style.width = `${pct.toFixed(1)}%`;
         this.hudBossFill.style.backgroundColor = bossInfo.accentColor;
-        this.hudBossHpText.textContent = `${hpInt} / ${maxInt}`;
+        this.hudBossHpText.textContent = isCoop
+          ? `${Math.round(pct)}%`
+          : `${hpInt} / ${maxInt}`;
       }
 
       const bossFrame = Math.floor(this.previewAnimSec * 3) % 2;
@@ -1229,6 +1969,87 @@ export class UIManager {
         this.hudArtifactsStrip.innerHTML = '';
       }
     }
+  }
+
+  // ==========================================================================
+  // 2B. LIVE CO-OP SPEED-READABLE UPGRADE STRIP (NO CENTER MODAL!)
+  // ==========================================================================
+
+  private renderLiveUpgradeStrip(): void {
+    const up = this.coopUpgradeState;
+    if (!up || up.choices.length === 0 || !this.game.isCoopMode()) {
+      this.liveUpgradeLayer.innerHTML = '';
+      this.liveUpgradeLayer.classList.add('hidden');
+      return;
+    }
+
+    const overflowBadgeHtml =
+      up.pendingQueueCount > 0
+        ? `<div class="live-upgrade-overflow" title="${up.pendingQueueCount} additional level-up(s) queued">+${up.pendingQueueCount}</div>`
+        : '';
+
+    const sourceTag = up.source === 'boss_chest' ? 'BOSS CHEST' : 'LEVEL UP';
+
+    const cardsHtml = up.choices
+      .slice(0, 3)
+      .map((choice, idx) => {
+        const iconUrl =
+          this.game.sprites.iconUrls[choice.iconId] ?? this.game.sprites.iconUrls.ascended_relic;
+        const tierClass =
+          choice.tier === 'synergy' || choice.tier === 'artifact'
+            ? 'tier-gold'
+            : choice.tier === 'milestone'
+            ? 'tier-milestone'
+            : 'tier-standard';
+
+        return `
+          <button
+            type="button"
+            class="live-upgrade-card ${tierClass} ${up.pickInFlight ? 'picking' : ''}"
+            data-live-pick="${idx}"
+            ${up.pickInFlight ? 'disabled' : ''}
+          >
+            <span class="live-upgrade-hotkey">${idx + 1}</span>
+            <span class="live-upgrade-icon" style="background:${choice.color}">
+              <img class="pixel-art" src="${iconUrl}" alt="${escapeHtml(choice.shortTitle)}" />
+            </span>
+            <span class="live-upgrade-copy">
+              <span class="live-upgrade-title">${escapeHtml(choice.shortTitle)}</span>
+              <span class="live-upgrade-sep">·</span>
+              <span class="live-upgrade-tag">${escapeHtml(choice.shortTag)}</span>
+            </span>
+          </button>
+        `;
+      })
+      .join('');
+
+    this.liveUpgradeLayer.innerHTML = `
+      <div class="live-upgrade-dock" data-source="${up.source}">
+        <div class="live-upgrade-meta">
+          <span class="live-upgrade-source-pill ${up.source === 'boss_chest' ? 'chest' : ''}">${sourceTag}</span>
+          ${overflowBadgeHtml}
+        </div>
+        <div class="live-upgrade-cards">
+          ${cardsHtml}
+        </div>
+      </div>
+    `;
+
+    const buttons = this.liveUpgradeLayer.querySelectorAll<HTMLButtonElement>('[data-live-pick]');
+    buttons.forEach((btn) => {
+      btn.addEventListener('pointerdown', (e) => {
+        // Prevent touch taps on upgrade strip from spawning the canvas virtual joystick
+        e.stopPropagation();
+      });
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const idx = Number(btn.dataset.livePick) as UpgradeChoiceIndex;
+        if (idx === 0 || idx === 1 || idx === 2) {
+          this.game.pickCoopUpgrade(idx);
+          this.renderLiveUpgradeStrip();
+        }
+      });
+    });
   }
 
   // ==========================================================================
@@ -1427,7 +2248,10 @@ export class UIManager {
   // ==========================================================================
 
   private renderPauseModal(): void {
-    const heroId = this.game.player.heroId;
+    const isCoop = this.game.isCoopMode();
+    const heroId = this.game.getLocalHeroId();
+    const level = this.game.getLocalLevel();
+    const hpState = this.game.getLocalHp();
     const classDef = CLASSES[heroId];
     const stats = this.game.getComputedStats();
     const passives = this.game.getGlobalPassives();
@@ -1438,7 +2262,7 @@ export class UIManager {
 
     const cdrPct = Math.round((1 - stats.cooldownMult) * 100);
     const statRows: Array<[string, string]> = [
-      ['Max HP', `${Math.ceil(this.game.player.hp)} / ${Math.round(stats.maxHp)}`],
+      ['Max HP', `${hpState.hp} / ${Math.round(stats.maxHp)}`],
       ['HP Regen', `${stats.hpRegen.toFixed(1)}/s`],
       ['Move Speed', `${Math.round(stats.moveSpeed)}`],
       ['Armor', formatPercent(stats.armor)],
@@ -1549,19 +2373,32 @@ export class UIManager {
     const statsHiddenMobile = this.pauseTab !== 'stats' ? 'pause-panel-hidden-mobile' : '';
     const synHiddenMobile = this.pauseTab !== 'synergies' ? 'pause-panel-hidden-mobile' : '';
 
+    this.pauseLayer.classList.toggle('coop-live-pause', isCoop);
+
     this.pauseLayer.innerHTML = `
-      <div class="modal-card">
+      <div class="modal-card ${isCoop ? 'coop-live-pause-card' : ''}">
         <div class="pause-header">
           <div class="pause-title-group">
-            <h2 class="modal-banner">PAUSED</h2>
+            <h2 class="modal-banner">${isCoop ? 'BUILD & RECIPES' : 'PAUSED'}</h2>
+            ${
+              isCoop
+                ? `<span class="live-match-badge" title="Co-op matches never pause while viewing recipes">● LIVE MATCH</span>`
+                : ''
+            }
             <span class="px-pill" style="background:${classDef.accentColor}">
-              ${escapeHtml(classDef.name.toUpperCase())} • LV ${this.game.player.level} • ${formatTime(this.game.getElapsedRunSec())}
+              ${escapeHtml(classDef.name.toUpperCase())} • LV ${level} • ${formatTime(this.game.getElapsedRunSec())}
             </span>
           </div>
           <div class="pause-actions">
-            <button type="button" class="px-btn px-btn-primary" data-pause-resume>RESUME</button>
-            <button type="button" class="px-btn px-btn-peach" data-pause-restart>RESTART</button>
-            <button type="button" class="px-btn" data-pause-menu>MAIN MENU</button>
+            <button type="button" class="px-btn px-btn-primary" data-pause-resume>${isCoop ? 'CLOSE' : 'RESUME'}</button>
+            ${
+              isCoop
+                ? `<button type="button" class="px-btn px-btn-coral" data-pause-menu>LEAVE MATCH</button>`
+                : `
+                  <button type="button" class="px-btn px-btn-peach" data-pause-restart>RESTART</button>
+                  <button type="button" class="px-btn" data-pause-menu>MAIN MENU</button>
+                `
+            }
             <button type="button" class="px-btn ${aimMode === 'mouse' ? 'px-btn-blue' : ''}" data-pause-aim>
               AIM: ${aimMode === 'mouse' ? 'MOUSE' : 'AUTO'}
             </button>
@@ -1570,6 +2407,12 @@ export class UIManager {
             </button>
           </div>
         </div>
+
+        ${
+          isCoop
+            ? `<div class="live-match-warning">Co-op stays LIVE while this menu is open — watch out for bosses & waves! Press ESC / P to close quickly.</div>`
+            : ''
+        }
 
         <div class="pause-tabs">
           <button type="button" class="px-btn pause-tab-btn ${this.pauseTab === 'stats' ? 'active' : ''}" data-pause-tab="stats">
@@ -1611,7 +2454,7 @@ export class UIManager {
         </div>
 
         ${
-          this.debugUnlocked
+          this.debugUnlocked && !isCoop
             ? `
         <div class="debug-bar">
           <h3 class="pause-section-title">
@@ -1635,15 +2478,31 @@ export class UIManager {
         <div class="pause-confirm-overlay" data-pause-confirm-overlay>
           <div class="pause-confirm-card">
             <h3 class="pause-confirm-title">
-              ${this.pauseConfirmAction === 'restart' ? 'RESTART RUN?' : 'EXIT TO MAIN MENU?'}
+              ${
+                this.pauseConfirmAction === 'restart'
+                  ? 'RESTART RUN?'
+                  : isCoop
+                  ? 'LEAVE CO-OP MATCH?'
+                  : 'EXIT TO MAIN MENU?'
+              }
             </h3>
             <p class="pause-confirm-text">
-              Abandon current run? Current progress will be lost.
+              ${
+                isCoop
+                  ? 'Disconnect from your squad and return to the Main Menu?'
+                  : 'Abandon current run? Current progress will be lost.'
+              }
             </p>
             <div class="pause-confirm-actions">
               <button type="button" class="px-btn" data-pause-confirm-cancel>CANCEL</button>
               <button type="button" class="px-btn px-btn-coral" data-pause-confirm-yes>
-                ${this.pauseConfirmAction === 'restart' ? 'CONFIRM RESTART' : 'EXIT TO MENU'}
+                ${
+                  this.pauseConfirmAction === 'restart'
+                    ? 'CONFIRM RESTART'
+                    : isCoop
+                    ? 'LEAVE MATCH'
+                    : 'EXIT TO MENU'
+                }
               </button>
             </div>
           </div>
@@ -1687,11 +2546,16 @@ export class UIManager {
       this.pauseConfirmAction = null;
       this.game.audio.unlock();
       this.game.audio.playClick();
-      if (action === 'restart') {
+      if (action === 'restart' && !isCoop) {
         this.resetHudCaches();
         this.game.startRun(this.game.player.heroId);
       } else if (action === 'menu') {
-        this.game.setState('menu');
+        if (isCoop) {
+          this.coopRoomState = null;
+          this.game.leaveCoopRoom();
+        } else {
+          this.game.setState('menu');
+        }
       }
     });
 
@@ -1716,7 +2580,7 @@ export class UIManager {
       });
     });
 
-    // Bind Debug Tools (only present when debugUnlocked === true)
+    // Bind Debug Tools (Solo Offline only)
     const bossBtns = this.pauseLayer.querySelectorAll<HTMLButtonElement>('[data-debug-boss]');
     bossBtns.forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -1736,13 +2600,13 @@ export class UIManager {
   }
 
   // ==========================================================================
-  // 5. GAME OVER MODAL
+  // 5. GAME OVER & CO-OP MATCH SUMMARY MODALS
   // ==========================================================================
 
   private renderGameOverModal(summary: RunStatsSnapshot): void {
     const heroId = this.game.player.heroId;
     const classDef = CLASSES[heroId];
-    const heroDataUrl = this.game.sprites.heroes[heroId][0].toDataURL();
+    const heroDataUrl = this.heroIconUrls[heroId];
     const nb = summary.newBests;
 
     const slotsHtml = this.game
@@ -1842,6 +2706,87 @@ export class UIManager {
       this.game.audio.unlock();
       this.game.audio.playClick();
       this.game.setState('menu');
+    });
+  }
+
+  private renderCoopMatchEndModal(summary: CoopMatchEndSummary): void {
+    const mySlotId = this.game.net.getSlotId();
+
+    const rosterHtml = summary.players
+      .map((pl) => {
+        const cls = CLASSES[pl.heroId];
+        const isMe = pl.slotId === mySlotId;
+        return `
+          <div class="coop-summary-player ${isMe ? 'is-me' : ''}">
+            <div class="squad-icon-box" style="background:${cls.accentColor}">
+              <img class="pixel-art" src="${this.heroIconUrls[pl.heroId]}" alt="${escapeHtml(cls.name)}" />
+            </div>
+            <div class="coop-summary-player-meta">
+              <div class="coop-summary-player-name">
+                ${escapeHtml(pl.name)} ${isMe ? '<span class="px-pill lobby-you-pill">YOU</span>' : ''}
+              </div>
+              <div class="coop-summary-player-sub">${escapeHtml(cls.name)} • LV ${pl.level}</div>
+            </div>
+          </div>
+        `;
+      })
+      .join('');
+
+    const slotsHtml = this.game
+      .getActiveSlots()
+      .map((slot) => {
+        if (slot.kind === 'synergy') {
+          const syn = SYNERGIES[slot.id as keyof typeof SYNERGIES];
+          return `
+            <div class="hud-ability-slot synergy" title="${escapeHtml(syn.name)}">
+              <img class="pixel-art" src="${this.game.sprites.iconUrls[syn.iconId]}" alt="${escapeHtml(syn.name)}" />
+              <span class="hud-slot-lv syn">★</span>
+            </div>
+          `;
+        }
+        const ab = ABILITIES[slot.id as keyof typeof ABILITIES];
+        return `
+          <div class="hud-ability-slot" title="${escapeHtml(ab.name)} Lv ${slot.level}">
+            <img class="pixel-art" src="${this.game.sprites.iconUrls[ab.iconId]}" alt="${escapeHtml(ab.name)}" />
+            <span class="hud-slot-lv ${slot.level >= MAX_ABILITY_LEVEL ? 'max' : ''}">
+              ${slot.level >= MAX_ABILITY_LEVEL ? 'MAX' : `L${slot.level}`}
+            </span>
+          </div>
+        `;
+      })
+      .join('');
+
+    this.gameOverLayer.innerHTML = `
+      <div class="modal-card modal-card-narrow">
+        <div class="modal-header-center">
+          <span class="px-pill" style="background:${summary.victory ? 'var(--mint)' : 'var(--coral)'}">
+            ONLINE CO-OP MATCH
+          </span>
+          <h2 class="modal-banner">${summary.victory ? 'SQUAD VICTORY!' : 'SQUAD DEFEATED'}</h2>
+          <p class="modal-sub">
+            ${formatTime(summary.elapsedRunSec)} • ${summary.kills} Kills • ${summary.bossesDefeated} Bosses Slain
+          </p>
+        </div>
+
+        <div class="coop-summary-roster">
+          ${rosterHtml}
+        </div>
+
+        <div class="gameover-loadout">
+          ${slotsHtml}
+        </div>
+
+        <div class="gameover-actions">
+          <button type="button" class="px-btn px-btn-primary" data-coop-end-menu>MAIN MENU</button>
+        </div>
+      </div>
+    `;
+
+    this.gameOverLayer.querySelector('[data-coop-end-menu]')?.addEventListener('click', () => {
+      this.game.audio.unlock();
+      this.game.audio.playClick();
+      this.coopRoomState = null;
+      this.game.leaveCoopRoom();
     });
   }
 

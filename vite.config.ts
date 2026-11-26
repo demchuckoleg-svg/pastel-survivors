@@ -3,6 +3,14 @@ import { viteSingleFile } from 'vite-plugin-singlefile';
 
 export default defineConfig({
   plugins: [viteSingleFile()],
+  server: {
+    proxy: {
+      '/ws': {
+        target: 'http://localhost:3000',
+        ws: true,
+      },
+    },
+  },
   resolve: {
     alias: {
       '@shared': new URL('./src/shared', import.meta.url).pathname,

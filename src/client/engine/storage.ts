@@ -25,6 +25,8 @@ export interface RunSummaryInput {
 export interface GameSettings {
   muted: boolean;
   aimMode: AimMode;
+  nickname: string;
+  serverUrlOverride: string;
 }
 
 export interface SaveData {
@@ -53,6 +55,8 @@ function createDefaultSaveData(): SaveData {
     settings: {
       muted: false,
       aimMode: 'auto',
+      nickname: '',
+      serverUrlOverride: '',
     },
     bestRuns: {
       mage: createEmptyRecord(),
@@ -130,6 +134,14 @@ export function loadSaveData(): SaveData {
       settings: {
         muted: Boolean(rawSettings.muted),
         aimMode: rawSettings.aimMode === 'mouse' ? 'mouse' : 'auto',
+        nickname:
+          typeof rawSettings.nickname === 'string'
+            ? rawSettings.nickname.trim().slice(0, 20)
+            : '',
+        serverUrlOverride:
+          typeof rawSettings.serverUrlOverride === 'string'
+            ? rawSettings.serverUrlOverride.trim().slice(0, 200)
+            : '',
       },
       bestRuns,
     };
@@ -224,6 +236,30 @@ export function setAimModePreference(aimMode: AimMode): void {
   const data = loadSaveData();
   if (data.settings.aimMode === aimMode) return;
   data.settings.aimMode = aimMode;
+  persistSaveData(data);
+}
+
+export function getNickname(): string {
+  return loadSaveData().settings.nickname;
+}
+
+export function setNickname(nickname: string): void {
+  const cleaned = nickname.trim().slice(0, 20);
+  const data = loadSaveData();
+  if (data.settings.nickname === cleaned) return;
+  data.settings.nickname = cleaned;
+  persistSaveData(data);
+}
+
+export function getServerUrlOverride(): string {
+  return loadSaveData().settings.serverUrlOverride;
+}
+
+export function setServerUrlOverride(url: string): void {
+  const cleaned = url.trim().slice(0, 200);
+  const data = loadSaveData();
+  if (data.settings.serverUrlOverride === cleaned) return;
+  data.settings.serverUrlOverride = cleaned;
   persistSaveData(data);
 }
 
